@@ -158,21 +158,16 @@ fn object_assign(args: Vec<JsValue>) -> JsValue {
     if args.iter().all(|arg| matches!(arg, JsValue::Object { .. })) {
         if let Some(mut merged_object) = args.into_iter().reduce(|mut acc, cur| {
             if let JsValue::Object {
-                parts,
-                mutable,
-                missing_unknown,
-                ..
+                parts, mutability, ..
             } = &mut acc
                 && let JsValue::Object {
                     parts: next_parts,
-                    mutable: next_mutable,
-                    missing_unknown: next_missing_unknown,
+                    mutability: next_mutability,
                     ..
                 } = &cur
             {
                 parts.extend_from_slice(next_parts);
-                *mutable |= *next_mutable;
-                *missing_unknown |= *next_missing_unknown;
+                mutability.merge_with(*next_mutability);
             }
             acc
         }) {

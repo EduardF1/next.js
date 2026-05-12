@@ -18,8 +18,9 @@ use turbopack_core::{
 use crate::{
     AnalyzeMode, EcmascriptParsable,
     analyzer::{
-        ConstantValue, JsValue, ModuleValue, ObjectPart, builtin::replace_builtin,
-        graph::create_graph, linker::link, well_known::replace_well_known,
+        ConstantValue, JsValue, ModuleValue, ObjectMutability, ObjectPart,
+        builtin::replace_builtin, graph::create_graph, linker::link,
+        well_known::replace_well_known,
     },
     directive::parse_module_turbopack_directives,
     parse::ParseResult,
@@ -96,7 +97,7 @@ impl ConstantsModule {
         //   `undefined`. Because we return a JsValue::Object even if the module has only some
         //   constants exports, this would cause `import {NON_CONSTANT_EXPORT}` to be incorrectly
         //   replaced with `undefined`.
-        JsValue::frozen_object_missing_unknown(
+        JsValue::object_with_mutability(
             self.exports
                 .iter()
                 .map(|(key, value)| {
@@ -134,6 +135,7 @@ impl ConstantsModule {
                     )
                 })
                 .collect(),
+            ObjectMutability::FrozenSubset,
         )
     }
 }

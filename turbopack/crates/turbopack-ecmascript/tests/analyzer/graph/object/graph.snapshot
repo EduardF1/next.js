@@ -591,8 +591,7 @@
                     ),
                 ),
             ],
-            mutable: true,
-            missing_unknown: false,
+            mutability: Mutable,
         },
     ),
     (
@@ -683,8 +682,7 @@
                     ),
                 ),
             ],
-            mutable: true,
-            missing_unknown: false,
+            mutability: Mutable,
         },
     ),
     (
@@ -737,8 +735,7 @@
                     ),
                 ),
             ],
-            mutable: true,
-            missing_unknown: false,
+            mutability: Mutable,
         },
     ),
     (
@@ -788,8 +785,7 @@
                     ),
                 ),
             ],
-            mutable: true,
-            missing_unknown: false,
+            mutability: Mutable,
         },
     ),
 ]

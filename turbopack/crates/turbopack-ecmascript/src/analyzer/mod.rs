@@ -414,6 +414,42 @@ impl Display for LogicalProperty {
     }
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ObjectMutability {
+    /// Known properties: frozen (= <value>)
+    /// Missing properties: frozen (= Undefined)
+    Frozen,
+    /// Known properties: frozen (= <value>)
+    /// Missing properties: mutable (= Unknown)
+    FrozenSubset,
+    /// Known properties: mutable (= <value> | Unknown)
+    /// Missing properties: mutable (= Unknown)
+    Mutable,
+}
+
+impl ObjectMutability {
+    fn merge_with(&mut self, other: Self) {
+        *self = std::cmp::max(*self, other)
+    }
+
+    fn is_mutable(&self) -> bool {
+        matches!(self, ObjectMutability::Mutable)
+    }
+    fn is_missing_unknown(&self) -> bool {
+        matches!(self, ObjectMutability::FrozenSubset)
+    }
+}
+
+impl Display for ObjectMutability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ObjectMutability::Frozen => write!(f, "frozen"),
+            ObjectMutability::FrozenSubset => write!(f, "frozen subset"),
+            ObjectMutability::Mutable => write!(f, ""),
+        }
+    }
+}
+
 /// TODO: Use `Arc`
 ///
 /// There are 4 kinds of values: Leaves, Nested, Operations, and Placeholders
@@ -468,13 +504,7 @@ pub enum JsValue {
     Object {
         total_nodes: u32,
         parts: Vec<ObjectPart>,
-        /// This value might be inaccurate because it can change after declaration. So reads always
-        /// are an `<value> | Unknown` alternative
-        mutable: bool,
-        /// If true, any missing properties are treated as unknown, instead of undefined. Note that
-        /// this is only interesting with `mutable: false`. Because with `mutable: true`, all
-        /// properties are a `<value> | Unknown` alternative anyway.
-        missing_unknown: bool,
+        mutability: ObjectMutability,
     },
     /// A list of alternative values
     Alternatives {
@@ -872,8 +902,7 @@ impl TryFrom<&CompileTimeDefineValue> for JsValue {
                             ))
                         })
                         .collect::<Result<Vec<_>>>()?,
-                    mutable: false,
-                    missing_unknown: false,
+                    mutability: ObjectMutability::Frozen,
                 };
                 js_value.update_total_nodes();
                 return Ok(js_value);
@@ -987,18 +1016,12 @@ impl Display for JsValue {
             ),
             JsValue::Object {
                 parts,
-                mutable,
-                missing_unknown,
+                mutability,
                 total_nodes: _,
             } => write!(
                 f,
-                "{}{}{{{}}}",
-                if *mutable { "" } else { "frozen " },
-                if *missing_unknown {
-                    "missing_unknown "
-                } else {
-                    ""
-                },
+                "{}{{{}}}",
+                mutability,
                 parts
                     .iter()
                     .map(|v| v.to_string())
@@ -1360,12 +1383,11 @@ impl JsValue {
                 })
                 .sum::<u32>(),
             parts: list,
-            mutable: true,
-            missing_unknown: false,
+            mutability: ObjectMutability::Mutable,
         }
     }
 
-    pub fn frozen_object(list: Vec<ObjectPart>) -> Self {
+    pub fn object_with_mutability(list: Vec<ObjectPart>, mutability: ObjectMutability) -> Self {
         Self::Object {
             total_nodes: 1 + list
                 .iter()
@@ -1375,23 +1397,7 @@ impl JsValue {
                 })
                 .sum::<u32>(),
             parts: list,
-            mutable: false,
-            missing_unknown: false,
-        }
-    }
-
-    pub fn frozen_object_missing_unknown(list: Vec<ObjectPart>) -> Self {
-        Self::Object {
-            total_nodes: 1 + list
-                .iter()
-                .map(|v| match v {
-                    ObjectPart::KeyValue(k, v) => k.total_nodes() + v.total_nodes(),
-                    ObjectPart::Spread(s) => s.total_nodes(),
-                })
-                .sum::<u32>(),
-            parts: list,
-            mutable: false,
-            missing_unknown: true,
+            mutability,
         }
     }
 
@@ -1609,8 +1615,7 @@ impl JsValue {
             JsValue::Object {
                 total_nodes: c,
                 parts,
-                mutable: _,
-                missing_unknown: _,
+                mutability: _,
             } => {
                 *c = 1 + parts
                     .iter()
@@ -1753,17 +1758,11 @@ impl JsValue {
             ),
             JsValue::Object {
                 parts,
-                mutable,
-                missing_unknown,
+                mutability,
                 total_nodes: _,
             } => format!(
-                "{}{}{{{}}}",
-                if *mutable { "" } else { "frozen " },
-                if *missing_unknown {
-                    "missing_unknown "
-                } else {
-                    ""
-                },
+                "{}{{{}}}",
+                mutability,
                 pretty_join(
                     &parts
                         .iter()
@@ -3448,16 +3447,14 @@ impl JsValue {
                 JsValue::Object {
                     total_nodes: lc,
                     parts: lp,
-                    mutable: lm,
-                    missing_unknown: lmu,
+                    mutability: lm,
                 },
                 JsValue::Object {
                     total_nodes: rc,
                     parts: rp,
-                    mutable: rm,
-                    missing_unknown: rmu,
+                    mutability: rm,
                 },
-            ) => lc == rc && lm == rm && lmu == rmu && all_parts_similar(lp, rp, depth - 1),
+            ) => lc == rc && lm == rm && all_parts_similar(lp, rp, depth - 1),
             (JsValue::Url(l, kl), JsValue::Url(r, kr)) => l == r && kl == kr,
             (
                 JsValue::Alternatives {

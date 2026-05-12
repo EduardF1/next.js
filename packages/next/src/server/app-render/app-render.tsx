@@ -251,7 +251,14 @@ import {
 import type { Params } from '../request/params'
 import { ImageConfigContext } from '../../shared/lib/image-config-context.shared-runtime'
 import { imageConfigDefault } from '../../shared/lib/image-config'
-import { RenderStage, StagedRenderingController } from './staged-rendering'
+import {
+  getNextStage,
+  isAdvanceableRenderStage,
+  RENDER_STAGE_ADVANCE_ORDER,
+  RenderStage,
+  StagedRenderingController,
+  type AdvanceableRenderStage,
+} from './staged-rendering'
 import {
   anySegmentHasRuntimePrefetchEnabled,
   isPageAllowedToBlock,
@@ -277,6 +284,7 @@ import type {
 } from '../../build/segment-config/app/app-segment-config'
 import { ResponseCookies } from '../web/spec-extension/cookies'
 import { isInstantValidationError } from './instant-validation/instant-validation-error'
+import { createPromiseWithResolvers } from '../../shared/lib/promise-with-resolvers'
 
 export type GetDynamicParamFromSegment = (
   // The LoaderTree to extract the dynamic param from
@@ -391,7 +399,7 @@ function parseRequestHeaders(
   const isAppShellPrefetchRequest = headers[NEXT_ROUTER_PREFETCH_HEADER] === '3'
 
   // App Shell prefetches are a subtype of runtime prefetch — same code path,
-  // with `forceOmitParams` set on the prerender store.
+  // but rendering less content.
   const isRuntimePrefetchRequest =
     headers[NEXT_ROUTER_PREFETCH_HEADER] === '2' || isAppShellPrefetchRequest
 
@@ -591,6 +599,7 @@ async function generateDynamicRSCPayload(
     skipPageRendering?: boolean
     staleTimeIterable?: AsyncIterable<number>
     staticStageByteLengthPromise?: Promise<number>
+    shellByteLengthPromise?: Promise<number | null>
     runtimePrefetchStream?: ReadableStream<Uint8Array>
   }
 ): Promise<RSCPayload> {
@@ -735,6 +744,9 @@ async function generateDynamicRSCPayload(
 
   if (options?.staticStageByteLengthPromise !== undefined) {
     baseResponse.l = options.staticStageByteLengthPromise
+  }
+  if (options?.shellByteLengthPromise !== undefined) {
+    baseResponse.a = options.shellByteLengthPromise
   }
 
   if (options?.runtimePrefetchStream !== undefined) {
@@ -927,7 +939,8 @@ async function generateStagedDynamicFlightRenderResultWeb(
   const stageController = new StagedRenderingController(
     null, // no aborting
     null, // no abandoning
-    shouldTrackSyncIO
+    shouldTrackSyncIO,
+    true // has shells
   )
 
   // Initialize stale time tracking on the request store.
@@ -950,10 +963,8 @@ async function generateStagedDynamicFlightRenderResultWeb(
   // Deferred promise for the static stage byte length. Flight serializes the
   // resolved value into the stream so the client knows where the static
   // prefix ends.
-  let resolveStaticStageByteLength: (count: number) => void
-  const staticStageByteLengthPromise = new Promise<number>((resolve) => {
-    resolveStaticStageByteLength = resolve
-  })
+  const staticStageByteLengthDeferred = createPromiseWithResolvers<number>()
+  const shellByteLengthDeferred = createPromiseWithResolvers<number | null>()
 
   // Check if this route has opted into runtime prefetching via
   // unstable_instant. If so, we piggyback on the dynamic render to fill caches
@@ -1001,14 +1012,19 @@ async function generateStagedDynamicFlightRenderResultWeb(
     requestStore,
     generateDynamicRSCPayload,
     ctx,
-    { staleTimeIterable, staticStageByteLengthPromise, runtimePrefetchStream }
+    {
+      staleTimeIterable,
+      staticStageByteLengthPromise: staticStageByteLengthDeferred.promise,
+      shellByteLengthPromise: shellByteLengthDeferred.promise,
+      runtimePrefetchStream,
+    }
   )
 
   const { clientModules } = getClientReferenceManifest()
 
   const flightReadableStream = await runInSequentialTasks(
     () => {
-      stageController.advanceStage(RenderStage.Static)
+      stageController.advanceStage(RenderStage.ShellStatic)
 
       const stream = workUnitAsyncStorage.run(
         requestStore,
@@ -1020,11 +1036,17 @@ async function generateStagedDynamicFlightRenderResultWeb(
 
       const [dynamicStream, staticStream] = stream.tee()
 
-      countStaticStageBytes(staticStream, stageController).then(
-        resolveStaticStageByteLength
+      void countStaticStageBytesWeb(staticStream, stageController).then(
+        (byteLengths) => {
+          staticStageByteLengthDeferred.resolve(byteLengths.static)
+          shellByteLengthDeferred.resolve(byteLengths.shell)
+        }
       )
 
       return dynamicStream
+    },
+    () => {
+      stageController.advanceStage(RenderStage.Static)
     },
     () => {
       // This is a separate task that doesn't advance a stage. It forces
@@ -1086,7 +1108,8 @@ async function generateStagedDynamicFlightRenderResultNode(
   const stageController = new StagedRenderingController(
     null, // no aborting
     null, // no abandoning
-    shouldTrackSyncIO
+    shouldTrackSyncIO,
+    true // has shells
   )
 
   // Initialize stale time tracking on the request store.
@@ -1106,13 +1129,8 @@ async function generateStagedDynamicFlightRenderResultNode(
     selectStaleTime
   )
 
-  // Deferred promise for the static stage byte length. Flight serializes the
-  // resolved value into the stream so the client knows where the static
-  // prefix ends.
-  let resolveStaticStageByteLength: (count: number) => void
-  const staticStageByteLengthPromise = new Promise<number>((resolve) => {
-    resolveStaticStageByteLength = resolve
-  })
+  const staticStageByteLengthDeferred = createPromiseWithResolvers<number>()
+  const shellByteLengthDeferred = createPromiseWithResolvers<number | null>()
 
   // Check if this route has opted into runtime prefetching via
   // unstable_instant. If so, we piggyback on the dynamic render to fill caches
@@ -1160,14 +1178,19 @@ async function generateStagedDynamicFlightRenderResultNode(
     requestStore,
     generateDynamicRSCPayload,
     ctx,
-    { staleTimeIterable, staticStageByteLengthPromise, runtimePrefetchStream }
+    {
+      staleTimeIterable,
+      staticStageByteLengthPromise: staticStageByteLengthDeferred.promise,
+      shellByteLengthPromise: shellByteLengthDeferred.promise,
+      runtimePrefetchStream,
+    }
   )
 
   const { clientModules } = getClientReferenceManifest()
 
   const flightStream = await runInSequentialTasks(
     () => {
-      stageController.advanceStage(RenderStage.Static)
+      stageController.advanceStage(RenderStage.ShellStatic)
 
       const sourceStream = workUnitAsyncStorage.run(
         requestStore,
@@ -1182,11 +1205,17 @@ async function generateStagedDynamicFlightRenderResultNode(
       const dynamicStream = replayable.createReplayStream()
       const staticStream = replayable.createReplayStream()
 
-      countStaticStageBytesNode(staticStream, stageController).then(
-        resolveStaticStageByteLength
+      void countStaticStageBytesNode(staticStream, stageController).then(
+        (byteLengths) => {
+          staticStageByteLengthDeferred.resolve(byteLengths.static)
+          shellByteLengthDeferred.resolve(byteLengths.shell)
+        }
       )
 
       return dynamicStream
+    },
+    () => {
+      stageController.advanceStage(RenderStage.Static)
     },
     () => {
       // This is a separate task that doesn't advance a stage. It forces
@@ -1224,10 +1253,14 @@ async function spawnRuntimePrefetchWithFilledCaches(
     const { loaderTree } = componentMod.routeModule.userland
     const rootParams = getRootParams(loaderTree, getDynamicParamFromSegment)
     const staleTimeIterable = new StaleTimeIterable()
+    const shellByteLengthDeferred = createPromiseWithResolvers<number | null>()
 
     const { result } = await finalRuntimeServerPrerender(
       ctx,
-      generateDynamicRSCPayload.bind(null, ctx, { staleTimeIterable }),
+      generateDynamicRSCPayload.bind(null, ctx, {
+        staleTimeIterable,
+        shellByteLengthPromise: shellByteLengthDeferred.promise,
+      }),
       prerenderResumeDataCache,
       null, // renderResumeDataCache
       rootParams,
@@ -1236,7 +1269,9 @@ async function spawnRuntimePrefetchWithFilledCaches(
       requestStore.draftMode,
       onError,
       staleTimeIterable,
-      false // forceOmitParams — server-initiated background prefetch, not a shell request
+      // server-initiated background prefetch, not a shell request.
+      // render with params and rewind to a shell.
+      shellByteLengthDeferred
     )
 
     await result.prelude.pipeTo(writable)
@@ -1274,25 +1309,13 @@ async function stagedRenderWithoutCachesInDevWeb(
   const stageController = new StagedRenderingController(
     null, // no aborting
     null, // no abandoning
-    false // do not track sync IO (we don't have reliable stages)
+    false, // do not track sync IO (we don't have reliable stages)
+    false // no shells (because there's no validation here)
   )
 
   const environmentName = () => {
     const currentStage = stageController.currentStage
-    switch (currentStage) {
-      case RenderStage.Before:
-      case RenderStage.EarlyStatic:
-      case RenderStage.Static:
-        return 'Prerender'
-      case RenderStage.EarlyRuntime:
-      case RenderStage.Runtime:
-      case RenderStage.Dynamic:
-      case RenderStage.Abandoned:
-        return 'Server'
-      default:
-        currentStage satisfies never
-        throw new InvariantError(`Invalid render stage: ${currentStage}`)
-    }
+    return getEnvironmentNameForStageWithoutCaches(currentStage)
   }
 
   requestStore.stagedRendering = stageController
@@ -1344,25 +1367,13 @@ async function stagedRenderWithoutCachesInDevNode(
   const stageController = new StagedRenderingController(
     null, // no aborting
     null, // no abandoning
-    false // do not track sync IO (we don't have reliable stages)
+    false, // do not track sync IO (we don't have reliable stages)
+    false // no shells (because there's no validation here)
   )
 
   const environmentName = () => {
     const currentStage = stageController.currentStage
-    switch (currentStage) {
-      case RenderStage.Before:
-      case RenderStage.EarlyStatic:
-      case RenderStage.Static:
-        return 'Prerender'
-      case RenderStage.EarlyRuntime:
-      case RenderStage.Runtime:
-      case RenderStage.Dynamic:
-      case RenderStage.Abandoned:
-        return 'Server'
-      default:
-        currentStage satisfies never
-        throw new InvariantError(`Invalid render stage: ${currentStage}`)
-    }
+    return getEnvironmentNameForStageWithoutCaches(currentStage)
   }
 
   requestStore.stagedRendering = stageController
@@ -1395,6 +1406,27 @@ async function stagedRenderWithoutCachesInDevNode(
       stageController.advanceStage(RenderStage.Dynamic)
     }
   )
+}
+
+function getEnvironmentNameForStageWithoutCaches(stage: RenderStage) {
+  switch (stage) {
+    case RenderStage.Before:
+    case RenderStage.ShellEarlyStatic:
+    case RenderStage.ShellStatic:
+    case RenderStage.EarlyStatic:
+    case RenderStage.Static:
+      return 'Prerender'
+    case RenderStage.ShellEarlyRuntime:
+    case RenderStage.ShellRuntime:
+    case RenderStage.EarlyRuntime:
+    case RenderStage.Runtime:
+    case RenderStage.Dynamic:
+    case RenderStage.Abandoned:
+      return 'Server'
+    default:
+      stage satisfies never
+      throw new InvariantError(`Invalid render stage: ${stage}`)
+  }
 }
 
 /**
@@ -1624,7 +1656,7 @@ async function generateRuntimePrefetchResult(
   req: BaseNextRequest,
   ctx: AppRenderContext,
   requestStore: RequestStore,
-  forceOmitParams: boolean
+  isShell: boolean
 ): Promise<RenderResult> {
   const { workStore, renderOpts } = ctx
   const { isBuildTimePrerendering = false, onInstrumentationRequestError } =
@@ -1674,13 +1706,21 @@ async function generateRuntimePrefetchResult(
     rootParams,
     requestStore.headers,
     requestStore.cookies,
-    requestStore.draftMode,
-    forceOmitParams
+    requestStore.draftMode
   )
+
+  // If we're omitting params, there's no need to track the shell byte length,
+  // because the entire response is a shell.
+  const shellByteLengthDeferred = isShell
+    ? null
+    : createPromiseWithResolvers<number | null>()
 
   const response = await finalRuntimeServerPrerender(
     ctx,
-    generateDynamicRSCPayload.bind(null, ctx, { staleTimeIterable }),
+    generateDynamicRSCPayload.bind(null, ctx, {
+      staleTimeIterable,
+      shellByteLengthPromise: shellByteLengthDeferred?.promise,
+    }),
     prerenderResumeDataCache,
     renderResumeDataCache,
     rootParams,
@@ -1689,7 +1729,7 @@ async function generateRuntimePrefetchResult(
     requestStore.draftMode,
     onError,
     staleTimeIterable,
-    forceOmitParams
+    shellByteLengthDeferred
   )
 
   applyMetadataFromPrerenderResult(response, metadata, workStore)
@@ -1700,14 +1740,13 @@ async function generateRuntimePrefetchResult(
 
 async function prospectiveRuntimeServerPrerender(
   ctx: AppRenderContext,
-  getPayload: () => any,
+  getPayload: () => Promise<RSCPayload>,
   prerenderResumeDataCache: PrerenderResumeDataCache | null,
   renderResumeDataCache: RenderResumeDataCache | null,
   rootParams: Params,
   headers: PrerenderStoreModernRuntime['headers'],
   cookies: PrerenderStoreModernRuntime['cookies'],
-  draftMode: PrerenderStoreModernRuntime['draftMode'],
-  forceOmitParams: boolean
+  draftMode: PrerenderStoreModernRuntime['draftMode']
 ) {
   const { implicitTags, renderOpts, workStore } = ctx
   const { ComponentMod } = renderOpts
@@ -1757,7 +1796,6 @@ async function prospectiveRuntimeServerPrerender(
     headers,
     cookies,
     draftMode,
-    forceOmitParams,
   }
 
   const { clientModules } = getClientReferenceManifest()
@@ -1859,7 +1897,7 @@ function prependIsPartialByteToChunks(
 
 async function finalRuntimeServerPrerender(
   ctx: AppRenderContext,
-  getPayload: () => any,
+  getPayload: () => Promise<RSCPayload>,
   prerenderResumeDataCache: PrerenderResumeDataCache | null,
   renderResumeDataCache: RenderResumeDataCache | null,
   rootParams: Params,
@@ -1868,7 +1906,7 @@ async function finalRuntimeServerPrerender(
   draftMode: PrerenderStoreModernRuntime['draftMode'],
   onError: (err: unknown) => string | undefined,
   staleTimeIterable: StaleTimeIterable,
-  forceOmitParams: boolean
+  shellByteLengthDeferred: PromiseWithResolvers<number | null> | null
 ) {
   const { implicitTags, renderOpts } = ctx
   const { ComponentMod, experimental, isDebugDynamicAccesses } = renderOpts
@@ -1884,7 +1922,8 @@ async function finalRuntimeServerPrerender(
   const finalStageController = new StagedRenderingController(
     finalServerController.signal,
     null, // no abandoning
-    true // track sync IO
+    true, // track sync IO
+    true // has shells
   )
 
   const varyParamsAccumulator = createResponseVaryParamsAccumulator()
@@ -1915,8 +1954,11 @@ async function finalRuntimeServerPrerender(
     headers,
     cookies,
     draftMode,
-    forceOmitParams,
   }
+
+  const stageByteLengths = shellByteLengthDeferred
+    ? createStageByteLengths()
+    : null
 
   trackStaleTime(finalServerPrerenderStore, staleTimeIterable, selectStaleTime)
 
@@ -1932,11 +1974,12 @@ async function finalRuntimeServerPrerender(
 
   await runInSequentialTasks(
     async () => {
-      // EarlyStatic stage: render begins.
+      // ShellEarlyStatic stage: render begins.
       // Runtime-prefetchable segments render immediately.
       // Non-prefetchable segments are gated until the Static stage.
-      finalStageController.advanceStage(RenderStage.EarlyStatic)
-      const stream = workUnitAsyncStorage.run(
+      finalStageController.advanceStage(RenderStage.ShellEarlyStatic)
+
+      let stream = workUnitAsyncStorage.run(
         finalServerPrerenderStore,
         ComponentMod.renderToReadableStream,
         finalRSCPayload,
@@ -1948,6 +1991,17 @@ async function finalRuntimeServerPrerender(
         }
       )
 
+      if (stageByteLengths) {
+        let countStream: typeof stream
+        ;[stream, countStream] = stream.tee()
+        void countStageBytesUntilAbort(
+          stageByteLengths,
+          countStream,
+          finalStageController,
+          finalServerController.signal
+        ).catch(() => {})
+      }
+
       // Note: this await will only resolve after the last task (unless sync IO aborts the render earlier)
       // We await it here so that if the stream errors, it's not an unhandled rejection.
       await collectPrerenderChunksWeb(
@@ -1958,20 +2012,48 @@ async function finalRuntimeServerPrerender(
       )
     },
     () => {
-      // Advance to Static stage: resolve promise holding back
+      // Advance to ShellStatic stage: resolve promise holding back
       // non-prefetchable segments so they can begin rendering.
+      finalStageController.advanceStage(RenderStage.ShellStatic)
+    },
+    () => {
+      finalStageController.advanceStage(RenderStage.EarlyStatic)
+    },
+    () => {
       finalStageController.advanceStage(RenderStage.Static)
     },
     () => {
-      // Advance to EarlyRuntime stage: resolve cookies/headers for
-      // runtime-prefetchable segments. Sync IO is checked here.
-      finalStageController.advanceStage(RenderStage.EarlyRuntime)
+      // Advance to ShellEarlyRuntime stage: resolve cookies/headers for
+      // runtime-prefetchable segments, but not params/searchParams.
+      // Sync IO is not allowed here.
+
+      // TODO(runtime-ppr): are early stages needed here at all? it seems like a runtime prefetch
+      // should never include segments that aren't runtime prefetchable...
+      finalStageController.advanceStage(RenderStage.ShellEarlyRuntime)
     },
     () => {
-      // Advance to Runtime stage: resolve cookies/headers for
-      // non-prefetchable segments. Sync IO is allowed here.
-      finalStageController.advanceStage(RenderStage.Runtime)
+      // Advance to ShellRuntime stage: resolve cookies/headers for
+      // non-runtime-prefetchable segments.
+
+      // TODO(app-shells): This is strange: we allow sync IO here, but we don't want sync IO in a fallback.
+      // but this is probably dead code anyway, i.e. we won't render any non-runtime segments,
+      // so it should be fine?
+      finalStageController.advanceStage(RenderStage.ShellRuntime)
     },
+    // Only advance beyond the runtime shell (and unblock params)
+    // if we're producing a rewindable response.
+    ...(shellByteLengthDeferred
+      ? [
+          () => {
+            finalStageController.advanceStage(RenderStage.EarlyRuntime)
+          },
+          () => {
+            // Advance to Runtime stage: resolve cookies/headers for
+            // non-prefetchable segments. Sync IO is allowed here.
+            finalStageController.advanceStage(RenderStage.Runtime)
+          },
+        ]
+      : []),
     async () => {
       if (finalServerController.signal.aborted) {
         // If the server controller is already aborted we must have called
@@ -1981,8 +2063,23 @@ async function finalRuntimeServerPrerender(
         return
       }
 
+      if (shellByteLengthDeferred && stageByteLengths) {
+        // If advancing to the runtime stage didn't unblock new content,
+        // then the result does not depend on link data and can be used as a shell (indicated via `null`).
+        // Otherwise, send a byte length that the client should rewind to to get the shell.
+        const didLinkDataUnblockNewContent =
+          stageByteLengths[RenderStage.Runtime] >
+          stageByteLengths[RenderStage.ShellRuntime]
+        shellByteLengthDeferred.resolve(
+          didLinkDataUnblockNewContent
+            ? stageByteLengths[RenderStage.ShellRuntime]
+            : null
+        )
+      }
+
       staleTimeIterable.close()
       finishAccumulatingVaryParams(varyParamsAccumulator)
+
       // We're using a render, not a prerender, so React schedules rendering work in fast immediates,
       // and we need to wait a fast immediate for the stale time/vary params chunks to flush.
       await waitAtLeastOneReactRenderTask()
@@ -2068,6 +2165,7 @@ async function getRSCPayload(
     is404: boolean
     staleTimeIterable?: AsyncIterable<number>
     staticStageByteLengthPromise?: Promise<number>
+    shellByteLengthPromise?: Promise<number | null>
     runtimePrefetchStream?: ReadableStream<Uint8Array>
   }
 ): Promise<InitialRSCPayload & { P: ReactNode }> {
@@ -2075,6 +2173,7 @@ async function getRSCPayload(
     is404,
     staleTimeIterable,
     staticStageByteLengthPromise,
+    shellByteLengthPromise,
     runtimePrefetchStream,
   } = options
   const injectedCSS = new Set<string>()
@@ -2222,6 +2321,7 @@ async function getRSCPayload(
     h: getMetadataVaryParamsThenable(),
     s: staleTimeIterable,
     l: staticStageByteLengthPromise,
+    lf: shellByteLengthPromise,
     p: runtimePrefetchStream,
     // Include the per-page dynamic stale time from unstable_dynamicStaleTime, but
     // only for dynamic renders. The client treats its presence as
@@ -3695,7 +3795,8 @@ async function renderToStream(
           const stageController = new StagedRenderingController(
             null, // no aborting
             null, // no abandoning
-            shouldTrackSyncIO
+            shouldTrackSyncIO,
+            true // has shells
           )
 
           requestStore.stale = INFINITE_CACHE
@@ -3715,12 +3816,11 @@ async function renderToStream(
             selectStaleTime
           )
 
-          let resolveStaticStageByteLength: (count: number) => void
-          const staticStageByteLengthPromise = new Promise<number>(
-            (resolve) => {
-              resolveStaticStageByteLength = resolve
-            }
-          )
+          const staticStageByteLengthDeferred =
+            createPromiseWithResolvers<number>()
+          const shellByteLengthDeferred = createPromiseWithResolvers<
+            number | null
+          >()
 
           // If the route has runtime prefetching enabled, spawn a runtime
           // prerender after the resume render fills caches. The result is
@@ -3763,14 +3863,16 @@ async function renderToStream(
             {
               is404: res.statusCode === 404,
               staleTimeIterable,
-              staticStageByteLengthPromise,
+              staticStageByteLengthPromise:
+                staticStageByteLengthDeferred.promise,
+              shellByteLengthPromise: shellByteLengthDeferred.promise,
               runtimePrefetchStream,
             }
           )
 
           const flightStream = await runInSequentialTasks(
             () => {
-              stageController.advanceStage(RenderStage.Static)
+              stageController.advanceStage(RenderStage.ShellStatic)
 
               const stream = workUnitAsyncStorage.run(
                 requestStore,
@@ -3788,11 +3890,18 @@ async function renderToStream(
               const dynamicStream = replayable.createReplayStream()
               const staticStream = replayable.createReplayStream()
 
-              countStaticStageBytesNode(staticStream, stageController).then(
-                resolveStaticStageByteLength!
-              )
+              void countStaticStageBytesNode(
+                staticStream,
+                stageController
+              ).then((byteLengths) => {
+                staticStageByteLengthDeferred.resolve(byteLengths.static)
+                shellByteLengthDeferred.resolve(byteLengths.shell)
+              })
 
               return dynamicStream
+            },
+            () => {
+              stageController.advanceStage(RenderStage.Static)
             },
             () => {
               // This is a separate task that doesn't advance a stage. It forces
@@ -3827,8 +3936,10 @@ async function renderToStream(
           const stageController = new StagedRenderingController(
             null, // no aborting
             null, // no abandoning
-            shouldTrackSyncIO
+            shouldTrackSyncIO,
+            true // has shells
           )
+          // stageController.debug = true // DEBUG
 
           requestStore.stale = INFINITE_CACHE
           requestStore.stagedRendering = stageController
@@ -3847,13 +3958,11 @@ async function renderToStream(
             selectStaleTime
           )
 
-          let resolveStaticStageByteLength: (count: number) => void
-          const staticStageByteLengthPromise = new Promise<number>(
-            (resolve) => {
-              resolveStaticStageByteLength = resolve
-            }
-          )
-
+          const staticStageByteLengthDeferred =
+            createPromiseWithResolvers<number>()
+          const shellByteLengthDeferred = createPromiseWithResolvers<
+            number | null
+          >()
           // If the route has runtime prefetching enabled, spawn a runtime
           // prerender after the resume render fills caches. The result is
           // embedded in the initial RSC payload so the client can cache
@@ -3895,14 +4004,17 @@ async function renderToStream(
             {
               is404: res.statusCode === 404,
               staleTimeIterable,
-              staticStageByteLengthPromise,
+              staticStageByteLengthPromise:
+                staticStageByteLengthDeferred.promise,
+              shellByteLengthPromise: shellByteLengthDeferred.promise,
+
               runtimePrefetchStream,
             }
           )
 
           const flightStream = await runInSequentialTasks(
             () => {
-              stageController.advanceStage(RenderStage.Static)
+              stageController.advanceStage(RenderStage.ShellStatic)
 
               const stream = workUnitAsyncStorage.run(
                 requestStore,
@@ -3917,11 +4029,17 @@ async function renderToStream(
 
               const [dynamicStream, staticStream] = stream.tee()
 
-              countStaticStageBytes(staticStream, stageController).then(
-                resolveStaticStageByteLength!
+              void countStaticStageBytesWeb(staticStream, stageController).then(
+                (byteLengths) => {
+                  staticStageByteLengthDeferred.resolve(byteLengths.static)
+                  shellByteLengthDeferred.resolve(byteLengths.shell)
+                }
               )
 
               return dynamicStream
+            },
+            () => {
+              stageController.advanceStage(RenderStage.Static)
             },
             () => {
               // This is a separate task that doesn't advance a stage. It forces
@@ -4598,22 +4716,7 @@ async function renderWithRestartOnCacheMissInDevWeb(
 
   const environmentName = () => {
     const currentStage = requestStore.stagedRendering!.currentStage
-    switch (currentStage) {
-      case RenderStage.Before:
-      case RenderStage.EarlyStatic:
-      case RenderStage.Static:
-        return 'Prerender'
-      case RenderStage.EarlyRuntime:
-        return 'Prefetch'
-      case RenderStage.Runtime:
-        return 'Prefetchable'
-      case RenderStage.Dynamic:
-      case RenderStage.Abandoned:
-        return 'Server'
-      default:
-        currentStage satisfies never
-        throw new InvariantError(`Invalid render stage: ${currentStage}`)
-    }
+    return getEnvironmentNameForStage(currentStage)
   }
 
   //===============================================
@@ -4640,8 +4743,11 @@ async function renderWithRestartOnCacheMissInDevWeb(
   const initialStageController = new StagedRenderingController(
     initialDataController.signal,
     initialAbandonController,
-    true // track sync IO
+    true, // track sync IO
+    // TODO(app-shells): implement validation
+    false // no shells
   )
+  // initialStageController.debug = true
 
   requestStore.prerenderResumeDataCache = prerenderResumeDataCache
   // `getRenderResumeDataCache` will fall back to using `prerenderResumeDataCache` as `renderResumeDataCache`,
@@ -4804,8 +4910,11 @@ async function renderWithRestartOnCacheMissInDevWeb(
   const finalStageController = new StagedRenderingController(
     abortSignal,
     null, // no abandoning
-    true // track sync IO
+    true, // track sync IO
+    // TODO(app-shells): implement validation
+    false // no shells
   )
+  // finalStageController.debug = true
 
   // We've filled the caches, so now we can render as usual,
   // without any cache-filling mechanics.
@@ -4895,6 +5004,29 @@ async function renderWithRestartOnCacheMissInDevWeb(
   }
 }
 
+function getEnvironmentNameForStage(stage: RenderStage) {
+  switch (stage) {
+    case RenderStage.Before:
+    case RenderStage.ShellEarlyStatic:
+    case RenderStage.ShellStatic:
+    case RenderStage.EarlyStatic:
+    case RenderStage.Static:
+      return 'Prerender'
+    case RenderStage.ShellEarlyRuntime:
+    case RenderStage.EarlyRuntime:
+      return 'Prefetch'
+    case RenderStage.ShellRuntime:
+    case RenderStage.Runtime:
+      return 'Prefetchable'
+    case RenderStage.Dynamic:
+    case RenderStage.Abandoned:
+      return 'Server'
+    default:
+      stage satisfies never
+      throw new InvariantError(`Invalid render stage: ${stage}`)
+  }
+}
+
 async function renderWithRestartOnCacheMissInDevNode(
   ctx: AppRenderContext,
   initialRequestStore: RequestStore,
@@ -4913,22 +5045,7 @@ async function renderWithRestartOnCacheMissInDevNode(
 
   const environmentName = () => {
     const currentStage = requestStore.stagedRendering!.currentStage
-    switch (currentStage) {
-      case RenderStage.Before:
-      case RenderStage.EarlyStatic:
-      case RenderStage.Static:
-        return 'Prerender'
-      case RenderStage.EarlyRuntime:
-        return 'Prefetch'
-      case RenderStage.Runtime:
-        return 'Prefetchable'
-      case RenderStage.Dynamic:
-      case RenderStage.Abandoned:
-        return 'Server'
-      default:
-        currentStage satisfies never
-        throw new InvariantError(`Invalid render stage: ${currentStage}`)
-    }
+    return getEnvironmentNameForStage(currentStage)
   }
 
   //===============================================
@@ -4955,7 +5072,9 @@ async function renderWithRestartOnCacheMissInDevNode(
   const initialStageController = new StagedRenderingController(
     initialDataController.signal,
     initialAbandonController,
-    true // track sync IO
+    true, // track sync IO,
+    // TODO(app-shells): implement validation
+    false // no shells
   )
 
   requestStore.prerenderResumeDataCache = prerenderResumeDataCache
@@ -5114,7 +5233,9 @@ async function renderWithRestartOnCacheMissInDevNode(
   const finalStageController = new StagedRenderingController(
     abortSignal,
     null, // no abandoning
-    true // track sync IO
+    true, // track sync IO
+    // TODO(app-shells): implement validation
+    false // no shells
   )
 
   // We've filled the caches, so now we can render as usual,
@@ -5302,10 +5423,14 @@ function accumulateChunk(
   switch (stageController.currentStage) {
     case RenderStage.Before:
       throw new InvariantError('Unexpected stream chunk while in Before stage')
+    case RenderStage.ShellEarlyStatic: // TODO(app-shells): separate the shell chunks
+    case RenderStage.ShellStatic:
     case RenderStage.EarlyStatic:
     case RenderStage.Static:
       staticChunks.push(value)
     // fall through
+    case RenderStage.ShellEarlyRuntime: // TODO(app-shells): separate the shell chunks
+    case RenderStage.ShellRuntime:
     case RenderStage.EarlyRuntime:
     case RenderStage.Runtime:
       runtimeChunks.push(value)
@@ -5321,14 +5446,20 @@ function accumulateChunk(
   }
 }
 
-async function countStaticStageBytes(
+type StaticStageByteLengths = { shell: number; static: number }
+
+async function countStaticStageBytesWeb(
   stream: ReadableStream<Uint8Array>,
   stageController: StagedRenderingController
-): Promise<number> {
-  let byteLength = 0
+): Promise<StaticStageByteLengths> {
+  const byteLengths: StaticStageByteLengths = {
+    shell: 0,
+    static: 0,
+  }
   const reader = stream.getReader()
 
-  stageController.onStage(RenderStage.EarlyRuntime, () => {
+  const endStage = getNextStage(RenderStage.Static)
+  stageController.onStage(endStage, () => {
     reader.cancel()
   })
 
@@ -5337,25 +5468,36 @@ async function countStaticStageBytes(
     if (done) {
       break
     }
-    if (stageController.currentStage <= RenderStage.Static) {
-      byteLength += value.byteLength
-    } else {
+    // console.log(new TextDecoder().decode(value)) // DEBUG
+    if (stageController.currentStage >= endStage) {
       reader.cancel()
       break
     }
+    if (stageController.currentStage <= RenderStage.ShellStatic) {
+      byteLengths.shell += value.byteLength
+    }
+    if (stageController.currentStage <= RenderStage.Static) {
+      byteLengths.static += value.byteLength
+    }
   }
 
-  return byteLength
+  // console.log('countStaticStageBytes', byteLengths) // DEBUG
+  return byteLengths
 }
 
 async function countStaticStageBytesNode(
   stream: Readable,
   stageController: StagedRenderingController
-): Promise<number> {
-  let byteLength = 0
+): Promise<StaticStageByteLengths> {
+  const byteLengths: StaticStageByteLengths = {
+    shell: 0,
+    static: 0,
+  }
+  const endStage = getNextStage(RenderStage.Static)
+
   let cancelled = false
 
-  stageController.onStage(RenderStage.EarlyRuntime, () => {
+  stageController.onStage(endStage, () => {
     cancelled = true
     stream.destroy()
   })
@@ -5363,12 +5505,16 @@ async function countStaticStageBytesNode(
   try {
     for await (const value of stream) {
       if (cancelled) break
-      if (stageController.currentStage <= RenderStage.Static) {
-        byteLength += (value as Uint8Array).byteLength
-      } else {
+      if (stageController.currentStage >= endStage) {
         cancelled = true
         stream.destroy()
         break
+      }
+      if (stageController.currentStage <= RenderStage.ShellStatic) {
+        byteLengths.shell += (value as Uint8Array).byteLength
+      }
+      if (stageController.currentStage <= RenderStage.Static) {
+        byteLengths.static += (value as Uint8Array).byteLength
       }
     }
   } catch (err) {
@@ -5377,7 +5523,63 @@ async function countStaticStageBytesNode(
     }
   }
 
-  return byteLength
+  // console.log('countStaticStageBytesNode', byteLengths)
+  return byteLengths
+}
+
+type StageByteLengths = Record<AdvanceableRenderStage, number>
+
+function createStageByteLengths(): StageByteLengths {
+  const result: Partial<StageByteLengths> = {}
+  for (const stage of RENDER_STAGE_ADVANCE_ORDER) {
+    result[stage] = 0
+  }
+  return result as StageByteLengths
+}
+
+// TODO(app-shells): deduplicate with the above byte counting functions
+async function countStageBytesUntilAbort(
+  counts: StageByteLengths,
+  stream: ReadableStream<Uint8Array>,
+  stageController: StagedRenderingController,
+  abortSignal: AbortSignal
+): Promise<void> {
+  const reader = stream.getReader()
+  abortSignal.addEventListener('abort', reader.cancel.bind(reader), {
+    once: true,
+  })
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done || abortSignal.aborted) {
+      break
+    }
+    increaseChunkByteLengths(
+      counts,
+      stageController.currentStage,
+      value.byteLength
+    )
+  }
+}
+
+function increaseChunkByteLengths(
+  counts: StageByteLengths,
+  currentStage: RenderStage,
+  length: number
+) {
+  if (!isAdvanceableRenderStage(currentStage)) {
+    return
+  }
+  // Later stages include earlier stages, so we increment
+  // the byte count for all that are `>= currentStage`.
+  // Iterate in reverse so we don't have to skip the earlier ones.
+  for (let i = RENDER_STAGE_ADVANCE_ORDER.length - 1; i >= 0; i--) {
+    const stage = RENDER_STAGE_ADVANCE_ORDER[i]
+    if (stage < currentStage) {
+      break
+    }
+    counts[stage] += length
+  }
 }
 
 function createAsyncApiPromises(
@@ -5386,35 +5588,34 @@ function createAsyncApiPromises(
   mutableCookies: RequestStore['mutableCookies'],
   headers: RequestStore['headers']
 ): NonNullable<RequestStore['asyncApiPromises']> {
+  // If a render skips past shell stages and only uses the non-shell ones,
+  // Then we need to delay appropriately -- `ShellEarly<X>` and `Shell<X>` always happen before Early<X>,
+  // so advancing to `Early<X>` without going through the Shell stages would resolve everything at the
+  // same time and break the early/late separation.
+  const [EARLY_RUNTIME, LATE_RUNTIME] = stagedRendering.hasShells
+    ? ([RenderStage.ShellEarlyRuntime, RenderStage.ShellRuntime] as const)
+    : ([RenderStage.EarlyRuntime, RenderStage.Runtime] as const)
   return {
     // Runtime APIs (for prefetch segments)
-    cookies: stagedRendering.delayUntilStage(
-      RenderStage.Runtime,
-      'cookies',
-      cookies
-    ),
+    cookies: stagedRendering.delayUntilStage(LATE_RUNTIME, 'cookies', cookies),
     earlyCookies: stagedRendering.delayUntilStage(
-      RenderStage.EarlyRuntime,
+      EARLY_RUNTIME,
       'cookies',
       cookies
     ),
     mutableCookies: stagedRendering.delayUntilStage(
-      RenderStage.Runtime,
+      LATE_RUNTIME,
       'cookies',
       mutableCookies as RequestStore['cookies']
     ),
     earlyMutableCookies: stagedRendering.delayUntilStage(
-      RenderStage.EarlyRuntime,
+      EARLY_RUNTIME,
       'cookies',
       mutableCookies as RequestStore['cookies']
     ),
-    headers: stagedRendering.delayUntilStage(
-      RenderStage.Runtime,
-      'headers',
-      headers
-    ),
+    headers: stagedRendering.delayUntilStage(LATE_RUNTIME, 'headers', headers),
     earlyHeaders: stagedRendering.delayUntilStage(
-      RenderStage.EarlyRuntime,
+      EARLY_RUNTIME,
       'headers',
       headers
     ),
@@ -6488,7 +6689,9 @@ async function renderWithRestartOnCacheMissInValidation(
   const initialStageController = new StagedRenderingController(
     initialDataController.signal,
     initialAbandonController,
-    true // track sync IO
+    true, // track sync IO
+    // TODO(app-shells): implement validation
+    false // no shells
   )
 
   requestStore.prerenderResumeDataCache = prerenderResumeDataCache
@@ -6599,7 +6802,9 @@ async function renderWithRestartOnCacheMissInValidation(
   const finalStageController = new StagedRenderingController(
     finalDataController.signal, // abortable
     null, // no abandoning
-    true // track sync IO
+    true, // track sync IO
+    // TODO(app-shells): implement validation
+    false // no shells
   )
 
   requestStore.prerenderResumeDataCache = null

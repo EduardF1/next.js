@@ -298,13 +298,26 @@ impl Issue for NonConstantIssue {
     }
 
     async fn description(&self) -> Result<Option<StyledString>> {
-        Ok(Some(StyledString::Stack(vec![
-            StyledString::Line(vec![
-                StyledString::Text(rcstr!("It was analyzed to be ")),
-                StyledString::Code(self.value.0.clone().into()),
-            ]),
-            StyledString::Line(vec![StyledString::Code(self.value.1.clone().into())]),
-        ])))
+        Ok(Some(StyledString::Stack(
+            [
+                Some(StyledString::Line(vec![
+                    StyledString::Text(rcstr!("It was analyzed to be ")),
+                    StyledString::Code(self.value.0.clone().into()),
+                ])),
+                (!self.value.1.is_empty()).then(|| {
+                    StyledString::Line(vec![StyledString::Code(self.value.1.clone().into())])
+                }),
+                Some(StyledString::Line(vec![
+                    StyledString::Text(rcstr!(
+                        "It has to be a constant because the module contains "
+                    )),
+                    StyledString::Code(rcstr!("use turbopack: constants")),
+                ])),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        )))
     }
 
     fn source(&self) -> Option<IssueSource> {

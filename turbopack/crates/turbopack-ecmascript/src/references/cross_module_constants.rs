@@ -205,10 +205,15 @@ pub async fn get_constants(
                         return Ok(((&*value).try_into()?, true));
                     }
 
+                    // This is basically what's necessary to support imports in constant modules.
+                    // It's just that you'd need `get_constants_inner` which is not a turbotask (and
+                    // contains the logic of the current get_constants function). So that would redo
+                    // a small amount of work but would allow imports.
+                    //
+                    // TODO when opted in, also resolve imports
                     // if directives.constants_module
                     //     && let JsValue::Module(module) = &v
                     // {
-                    //     // TODO when opted in, also resolve imports
                     //     // We can't do a recursive turbotask call here, to prevent deadlocks.
                     //     if let Some(constants) =
                     //         get_constants(resolve_somehow(module), compile_time_info)

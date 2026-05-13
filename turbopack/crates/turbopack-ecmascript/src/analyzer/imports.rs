@@ -57,7 +57,7 @@ pub struct ImportAnnotations {
     turbopack_module_type: Option<RcStr>,
     chunking_type: Option<SpecifiedChunkingType>,
 
-    turbopack_constants: bool,
+    turbopack_constants: Option<bool>,
 }
 
 /// Enables a specified transition for the annotated import
@@ -78,7 +78,7 @@ impl ImportAnnotations {
         let mut turbopack_rename_as: Option<RcStr> = None;
         let mut turbopack_module_type: Option<RcStr> = None;
         let mut chunking_type: Option<SpecifiedChunkingType> = None;
-        let mut turbopack_constants: bool = false;
+        let mut turbopack_constants: Option<bool> = None;
         for prop in &with.props {
             let Some(kv) = prop.as_prop().and_then(|p| p.as_key_value()) else {
                 continue;
@@ -129,7 +129,7 @@ impl ImportAnnotations {
                 }
                 "turbopackConstants" => {
                     if let Some(Lit::Str(s)) = kv.value.as_lit() {
-                        turbopack_constants = s.value.to_string_lossy() == "true";
+                        turbopack_constants = Some(s.value.to_string_lossy() == "true");
                     }
                 }
                 _ => {
@@ -156,7 +156,7 @@ impl ImportAnnotations {
             || turbopack_rename_as.is_some()
             || turbopack_module_type.is_some()
             || chunking_type.is_some()
-            || turbopack_constants
+            || turbopack_constants.is_some()
         {
             Some(ImportAnnotations {
                 map,
@@ -203,7 +203,7 @@ impl ImportAnnotations {
                 turbopack_rename_as: None,
                 turbopack_module_type: None,
                 chunking_type: None,
-                turbopack_constants: false,
+                turbopack_constants: None,
             })
         } else {
             None
@@ -247,7 +247,7 @@ impl ImportAnnotations {
     }
 
     /// Returns true if there is a turbopackConstants attribute
-    pub fn has_turbopack_constants(&self) -> bool {
+    pub fn turbopack_constants(&self) -> Option<bool> {
         self.turbopack_constants
     }
 

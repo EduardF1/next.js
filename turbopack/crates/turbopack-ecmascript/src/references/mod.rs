@@ -1215,13 +1215,15 @@ async fn analyze_ecmascript_module_internal(
                         continue;
                     };
 
-                    if (export
-                        .as_ref()
-                        .is_some_and(|v| is_import_name_eligible_for_exports(v))
-                        || eval_context
-                            .imports
-                            .get_annotations(esm_reference_index)
-                            .is_some_and(|a| a.has_turbopack_constants()))
+                    if (eval_context
+                        .imports
+                        .get_annotations(esm_reference_index)
+                        .and_then(|a| a.turbopack_constants())
+                        .unwrap_or_else(|| {
+                            export
+                                .as_ref()
+                                .is_some_and(|v| is_import_name_eligible_for_exports(v))
+                        }))
                         && let JsValue::Constant(c) = analysis_state
                             .link_value(
                                 eval_context.imports.get_import_for_idx(
@@ -3610,11 +3612,11 @@ async fn value_visitor_inner(
                 && let Some(external) = module_value_to_well_known_object(mv)
             {
                 external
-            } else if (mv.analyze_for_constants
-                || mv
-                    .annotations
-                    .as_ref()
-                    .is_some_and(|a| a.has_turbopack_constants()))
+            } else if (mv
+                .annotations
+                .as_ref()
+                .and_then(|a| a.turbopack_constants())
+                .unwrap_or(mv.analyze_for_constants))
                 && let cache = {
                     // Without this inline block, constants_cache.lock() is held across the await
                     // point below.

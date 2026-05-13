@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": [],
+  "sections": [
+    {"offset": {"line": 4, "column": 0}, "map": {"version":3,"sources":["turbopack:///[project]/turbopack/crates/turbopack-tests/tests/snapshot/comptime/cross-module-attribute/input/other.js"],"sourcesContent":["export const lower = 'lowercase'\n\nexport const UPPER = 'UPPER'\n"],"names":["lower","UPPER"],"mappings":";;;;;;AAAO,MAAMA,QAAQ;AAEd,MAAMC,QAAQ"}},
+    {"offset": {"line": 16, "column": 0}, "map": {"version":3,"sources":["turbopack:///[project]/turbopack/crates/turbopack-tests/tests/snapshot/comptime/cross-module-attribute/input/index.js"],"sourcesContent":["import { lower } from './other' with { turbopackConstants: 'true' }\n\nif (lower === 'lowercase') {\n  console.log('x')\n} else {\n  require('./dead-code')\n}\nconsole.log(lower)\n\nimport { UPPER } from './other' with { turbopackConstants: 'false' }\nif (UPPER === 'UPPER') {\n  console.log('x')\n} else {\n  require('./correct-not-inlined')\n}\nconsole.log(UPPER)\n"],"names":["console","log"],"mappings":";AASA;;AAPA,wCAA2B;IACzBA,QAAQC,GAAG,CAAC;AACd;;AAGAD,QAAQC,GAAG;;AAGX,IAAI,+NAAK,KAAK,SAAS;IACrBD,QAAQC,GAAG,CAAC;AACd,OAAO;;;;;;AAEP;AACAD,QAAQC,GAAG,CAAC,+NAAK"}}]
+}

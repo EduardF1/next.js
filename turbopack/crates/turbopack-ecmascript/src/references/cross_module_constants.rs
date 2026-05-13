@@ -70,7 +70,7 @@ pub async fn module_value_to_constants_module(
             module_value
                 .annotations
                 .as_ref()
-                .is_some_and(|a| a.has_turbopack_constants()),
+                .and_then(|a| a.turbopack_constants()),
         )
     }))
 }
@@ -87,8 +87,8 @@ struct ConstantsModule {
 struct OptionConstantsModule(Option<ConstantsModule>);
 
 impl ConstantsModule {
-    pub fn as_js_value(&self, has_turbopack_annotation: bool) -> JsValue {
-        let has_opt_in = self.has_directive || has_turbopack_annotation;
+    pub fn as_js_value(&self, constant_annotation: Option<bool>) -> JsValue {
+        let has_opt_in = constant_annotation.unwrap_or(self.has_directive);
 
         // This has to be
         // - mutable:false, otherwise nothing would ever be inlined, because all property accesses

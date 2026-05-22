@@ -1288,5 +1288,6 @@
   "1287": "Expected stream state to be initialized before reading",
   "1288": "A render that hasn't started yet cannot be abandoned",
   "1289": "Expected a render with shells to start with a shell stage, got %s",
-  "1290": "Expected a render without shells to start with a non-shell stage, got %s"
+  "1290": "Expected a render without shells to start with a non-shell stage, got %s",
+  "1291": "Attempted to advance to stage %s but the render is limited to %s"
 }

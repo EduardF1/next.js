@@ -68,26 +68,16 @@ describe('instant-nav-panel', () => {
     }, href)
   }
 
+  function getInstantNavPanel(browser: Playwright) {
+    return browser.elementByCss('.instant-nav-panel')
+  }
+
   async function getInstantNavPanelText(browser: Playwright): Promise<string> {
-    return browser.elementByCssInstant('.instant-nav-panel').text()
+    return getInstantNavPanel(browser).text()
   }
 
   async function closePanelViaHeader(browser: Playwright) {
     return browser.elementByCss('#_next-devtools-panel-close').click()
-  }
-
-  async function hasInstantNavPanelOpen(browser: Playwright): Promise<void> {
-    await browser.elementByCssInstant('.instant-nav-panel')
-  }
-
-  async function waitForInstantNavPanelOpen(browser: Playwright) {
-    await retry(
-      async () => {
-        await hasInstantNavPanelOpen(browser)
-      },
-      5_000,
-      500
-    )
   }
 
   async function waitForAppHydration(browser: Playwright) {
@@ -101,7 +91,7 @@ describe('instant-nav-panel', () => {
     await waitForPanelRouterTransition()
     await clickInstantNavMenuItem(browser)
 
-    await waitForInstantNavPanelOpen(browser)
+    await getInstantNavPanel(browser)
     await waitForPanelRouterTransition()
   }
 
@@ -148,7 +138,7 @@ describe('instant-nav-panel', () => {
       5_000,
       250
     )
-    await waitForInstantNavPanelOpen(browser)
+    await getInstantNavPanel(browser)
     await waitForPanelRouterTransition()
   }
 
@@ -338,7 +328,7 @@ describe('instant-nav-panel', () => {
 
       await clickStartCapturing(browser)
       await browser.refresh()
-      await waitForInstantNavPanelOpen(browser)
+      await getInstantNavPanel(browser)
 
       await expectMpaPanel(browser)
     })
@@ -357,7 +347,6 @@ describe('instant-nav-panel', () => {
       await browser.waitForElementByCss('[data-testid="home-title"]')
 
       await retry(async () => {
-        await hasInstantNavPanelOpen(browser)
         const text = await getInstantNavPanelText(browser)
         expect(text).toContain('Page load')
         expect(text).toContain('prerendered UI')
@@ -374,7 +363,7 @@ describe('instant-nav-panel', () => {
       await openInstantNavPanel(browser)
       await clickStartCapturing(browser)
       await browser.refresh()
-      await waitForInstantNavPanelOpen(browser)
+      await getInstantNavPanel(browser)
       await expectMpaPanel(browser)
       await expectTargetPageMpaShell(browser)
 
@@ -394,7 +383,7 @@ describe('instant-nav-panel', () => {
       await openInstantNavPanel(browser)
       await clickStartCapturing(browser)
       await browser.refresh()
-      await waitForInstantNavPanelOpen(browser)
+      await getInstantNavPanel(browser)
       await expectMpaPanel(browser)
 
       await expectTargetPageMpaShell(browser)
@@ -415,7 +404,7 @@ describe('instant-nav-panel', () => {
           .click()
       })
       await browser.waitForElementByCss('[data-testid="mpa-target-title"]')
-      await waitForInstantNavPanelOpen(browser)
+      await getInstantNavPanel(browser)
 
       await expectMpaPanel(browser)
       await browser
@@ -433,7 +422,7 @@ describe('instant-nav-panel', () => {
       await openInstantNavPanel(browser)
       await clickStartCapturing(browser)
       await browser.refresh()
-      await waitForInstantNavPanelOpen(browser)
+      await getInstantNavPanel(browser)
       await expectMpaPanel(browser)
       await expectTargetPageMpaShell(browser)
       await waitForAppHydration(browser)
@@ -552,7 +541,7 @@ describe('instant-nav-panel', () => {
       await browser.refresh()
       await browser.waitForElementByCss('[data-testid="home-title"]')
       await waitForAppHydration(browser)
-      await waitForInstantNavPanelOpen(browser)
+      await getInstantNavPanel(browser)
       await expectMpaPanel(browser)
 
       await clickLink(browser, targetPage)
@@ -569,7 +558,7 @@ describe('instant-nav-panel', () => {
       await expectSpaPanel(browser)
 
       await browser.refresh()
-      await waitForInstantNavPanelOpen(browser)
+      await getInstantNavPanel(browser)
 
       const initialPanelText = await getInstantNavPanelText(browser)
       expect(initialPanelText).toContain('Page load')

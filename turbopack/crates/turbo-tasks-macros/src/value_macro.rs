@@ -138,10 +138,6 @@ struct ValueArguments {
     /// Should we `#[derive(turbo_tasks::OperationValue)]`?
     operation: Option<Span>,
     /// Set by `task_input` arg: emit an `impl TaskInput` with a field-walking `is_transient`.
-    /// Opt-in because the vast majority of `#[turbo_tasks::value]` types are output-only and
-    /// don't satisfy `TaskInput`'s supertrait bounds (`Clone + Eq + Hash + Encode + Decode +
-    /// ...`). Add this flag to types intended to be passed as `#[turbo_tasks::function]`
-    /// arguments.
     task_input: bool,
 }
 
@@ -566,10 +562,9 @@ pub fn value(args: TokenStream, input: TokenStream) -> TokenStream {
     );
 
     // Emit an `impl TaskInput for X` only when opted in with
-    // `#[turbo_tasks::value(task_input)]`. `is_resolved` and `resolve_input` use the trait
-    // defaults (`true` and a `CloneReady` future — correct because `NonLocalValue` guarantees no
-    // unresolved Vcs). `is_transient` walks fields, because contained `ResolvedVc`/`OperationVc`
-    // can still point to transient cells.
+    // `#[turbo_tasks::value(task_input)]`. Because values are `NonLocalValue` the `is_resolved` and
+    // `resolve_input` use the trivial trait defaults `is_transient` walks fields, because
+    // contained `ResolvedVc`/`OperationVc` can still point to transient cells.
     let task_input_impl = if task_input {
         let derive_input =
             item_to_derive_input(&item).expect("value macro only accepts struct/enum");

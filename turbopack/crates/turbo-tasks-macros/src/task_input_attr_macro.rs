@@ -1,6 +1,6 @@
 //! The `#[turbo_tasks::task_input]` attribute macro.
 //!
-//! Replaces the older `#[derive(TaskInput)]` proc-macro. When applied to a struct/enum, emits:
+//! When applied to a struct/enum, emits:
 //!
 //! - `unsafe impl NonLocalValue for Ty` (unless `contains_unresolved_vcs` is passed).
 //! - `impl turbo_tasks::TaskInput for Ty` with a field-walking `is_transient` (any contained `Vc`
@@ -28,6 +28,10 @@
 //! If the user adds `#[turbo_tasks::task_input]` (default mode) AND also derives `NonLocalValue`
 //! manually, rustc errors with a duplicate-impl error — the contradiction is caught at compile
 //! time without needing extra static-assertion machinery.
+//!
+//! When emitting `unsafe impl NonLocalValue`, the macro also emits inline static assertions
+//! (mirroring `#[derive(NonLocalValue)]`) so a field that is not `NonLocalValue` produces a
+//! compile error pointing at the offending field instead of unsoundly satisfying the trait.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -35,13 +39,17 @@ use quote::quote;
 use syn::{
     Error, Item, ItemEnum, ItemStruct, Meta, Token,
     parse::{Parse, ParseStream},
-    parse_macro_input,
+    parse_macro_input, parse_quote,
     spanned::Spanned,
 };
 
-use crate::expand::{
-    generate_exhaustive_destructuring, item_to_derive_input, match_expansion,
-    task_input_is_transient_body,
+use crate::{
+    assert_fields::assert_fields_impl_trait,
+    derive::trace_raw_vcs_macro::filter_field,
+    expand::{
+        generate_exhaustive_destructuring, item_to_derive_input, match_expansion,
+        task_input_is_transient_body,
+    },
 };
 
 struct TaskInputArguments {
@@ -246,9 +254,17 @@ pub fn task_input(args: TokenStream, input: TokenStream) -> TokenStream {
 
     // Emit `unsafe impl NonLocalValue` unless opted out. Doubles as a contradiction check:
     // a duplicate `#[derive(NonLocalValue)]` collides with this impl and errors.
+    // The assertions mirror `#[derive(NonLocalValue)]`: they fail compilation (pointing at the
+    // offending field) if any field does not implement `NonLocalValue`.
     let non_local_value_impl = if contains_unresolved_vcs.is_some() {
         quote! {}
     } else {
+        let assertions = assert_fields_impl_trait(
+            &parse_quote!(turbo_tasks::NonLocalValue),
+            &generics,
+            &derive_input.data,
+            filter_field,
+        );
         quote! {
             #[automatically_derived]
             unsafe impl #impl_generics turbo_tasks::NonLocalValue for #ident #ty_generics
@@ -256,6 +272,7 @@ pub fn task_input(args: TokenStream, input: TokenStream) -> TokenStream {
                 #(#existing_predicates,)*
                 #(#generic_type_params: turbo_tasks::NonLocalValue,)*
             {}
+            #assertions
         }
     };
 

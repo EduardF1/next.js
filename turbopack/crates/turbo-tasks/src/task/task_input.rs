@@ -45,7 +45,7 @@ impl<'a, T: Clone> Future for CloneReady<'a, T> {
         Poll::Ready(Ok(self
             .inner
             .take()
-            .expect("future already polled")
+            .expect("future already polled to completion")
             .clone()))
     }
 }

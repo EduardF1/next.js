@@ -2,7 +2,7 @@ mod deterministic_hash_macro;
 mod non_local_value_macro;
 mod operation_value_macro;
 mod task_storage_macro;
-mod trace_raw_vcs_macro;
+pub(crate) mod trace_raw_vcs_macro;
 mod value_debug_format_macro;
 mod value_debug_macro;
 pub(crate) mod value_to_string_macro;

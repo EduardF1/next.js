@@ -10,7 +10,7 @@ use turbo_tasks_hash::DeterministicHasher;
 use crate::{
     RawVc, TaskExecutionReason, TaskInput, TaskPersistence, TaskPriority,
     dyn_task_inputs::{
-        DynTaskInputs, OwnedStackDynTaskInputs, StackDynTaskInputs, StackDynTaskInputsSlot,
+        BoxedDynTaskInputs, DynTaskInputs, StackDynTaskInputs, StackDynTaskInputsSlot,
         any_as_encode,
     },
     macro_helpers::into_task_fn,
@@ -21,11 +21,13 @@ use crate::{
 type ResolveFuture<'a> = Pin<Box<dyn Future<Output = Result<Box<dyn DynTaskInputs>>> + Send + 'a>>;
 type ResolveFunctor = for<'a> fn(&'a dyn DynTaskInputs) -> ResolveFuture<'a>;
 
-type IsResolvedFunctor = fn(&dyn DynTaskInputs) -> bool;
-
+/// Filters out arguments that aren't used by the function body, returning the post-filter args
+/// together with the precomputed `TaskInput::is_resolved` answer for those filtered args. Fusing
+/// the two operations into one functor lets LLVM monomorphize and constant-fold them together,
+/// avoiding a second indirect call.
 #[doc(hidden)]
 pub type FilterOwnedArgsFunctor =
-    for<'a> fn(&'a mut dyn StackDynTaskInputs) -> OwnedStackDynTaskInputs;
+    for<'a> fn(&'a mut dyn StackDynTaskInputs) -> (bool, BoxedDynTaskInputs);
 #[doc(hidden)]
 pub type FilterAndResolveFunctor = ResolveFunctor;
 
@@ -40,7 +42,6 @@ pub struct ArgMeta {
     /// Encodes the argument directly to a hasher, avoiding buffer allocation.
     /// Uses the same encoding logic as bincode but writes to a [`DeterministicHasher`].
     pub hash_encode: AnyHashEncodeFn,
-    is_resolved: IsResolvedFunctor,
     resolve: ResolveFunctor,
     /// Used for trait methods to filter out unused arguments. `None` when all arguments are used
     /// (no filtering needed).
@@ -110,15 +111,10 @@ impl ArgMeta {
                 T::encode(any_as_encode::<T>(this), &mut encoder)
                     .expect("encoding to hasher should not fail");
             },
-            is_resolved: |value| downcast_args_ref::<T>(value).is_resolved(),
             resolve: resolve_functor_impl::<T>,
             filter_owned,
             filter_and_resolve,
         }
-    }
-
-    pub fn is_resolved(&self, value: &dyn DynTaskInputs) -> bool {
-        (self.is_resolved)(value)
     }
 
     pub async fn resolve(&self, value: &dyn DynTaskInputs) -> Result<Box<dyn DynTaskInputs>> {

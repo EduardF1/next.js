@@ -101,31 +101,35 @@ impl<T: DynTaskInputs> StackDynTaskInputs for StackDynTaskInputsSlot<T> {
 }
 
 /// Adapter for an already-boxed value (e.g., from async resolution tasks).
-pub struct OwnedStackDynTaskInputs {
+///
+/// Implements the [`StackDynTaskInputs`] trait over a heap-allocated `Box<dyn DynTaskInputs>`.
+/// The "Stack" in the trait name refers to the trait itself, not where the inputs live; this
+/// type's payload is on the heap.
+pub struct BoxedDynTaskInputs {
     slot: Option<Box<dyn DynTaskInputs>>,
 }
 
-impl OwnedStackDynTaskInputs {
+impl BoxedDynTaskInputs {
     #[inline]
     pub fn new(value: Box<dyn DynTaskInputs>) -> Self {
         Self { slot: Some(value) }
     }
 }
 
-impl StackDynTaskInputs for OwnedStackDynTaskInputs {
+impl StackDynTaskInputs for BoxedDynTaskInputs {
     #[inline]
     fn as_ref(&self) -> &dyn DynTaskInputs {
         &**self
             .slot
             .as_ref()
-            .expect("OwnedStackDynTaskInputs::as_ref called after take_box")
+            .expect("BoxedDynTaskInputs::as_ref called after take_box")
     }
 
     #[inline]
     fn take_box(&mut self) -> Box<dyn DynTaskInputs> {
         self.slot
             .take()
-            .expect("OwnedStackDynTaskInputs::take_box called twice")
+            .expect("BoxedDynTaskInputs::take_box called twice")
     }
 
     #[inline]

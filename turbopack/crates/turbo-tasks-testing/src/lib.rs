@@ -103,6 +103,7 @@ impl TurboTasksCallApi for VcStorage {
         func: &'static turbo_tasks::macro_helpers::NativeFunction,
         this: Option<RawVc>,
         arg: &mut dyn StackDynTaskInputs,
+        _inputs_resolved: bool,
         _persistence: TaskPersistence,
     ) -> RawVc {
         self.dynamic_call(func, this, arg.take_box())
@@ -122,6 +123,7 @@ impl TurboTasksCallApi for VcStorage {
         _trait_type: &'static turbo_tasks::TraitMethod,
         _this: RawVc,
         _arg: &mut dyn StackDynTaskInputs,
+        _inputs_resolved: bool,
         _persistence: TaskPersistence,
     ) -> RawVc {
         unreachable!()

@@ -78,7 +78,7 @@ pub use crate::{
     completion::{Completion, Completions},
     display::{ValueToString, ValueToStringRef},
     dyn_task_inputs::{
-        DynTaskInputs, OwnedStackDynTaskInputs, StackDynTaskInputs, StackDynTaskInputsSlot,
+        BoxedDynTaskInputs, DynTaskInputs, StackDynTaskInputs, StackDynTaskInputsSlot,
     },
     effect::{Effect, EffectError, EffectStateStorage, Effects, emit_effect, take_effects},
     error::PrettyPrintError,

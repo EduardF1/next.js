@@ -49,9 +49,8 @@ pub fn get_persistence_from_inputs(inputs: &impl TaskInput) -> TaskPersistence {
 }
 
 /// Computes `TaskInput::is_resolved` for the call's inputs at the macro-generated callsite, on
-/// the fully concrete tuple type. Lifting the check out of `ArgMeta`'s type-erased function pointer
-/// lets LLVM constant-fold the per-element checks for trivially-resolved inputs (e.g. primitives,
-/// `RcStr`) and reduces every direct turbo-tasks call by one indirect call plus one downcast.
+/// the fully concrete tuple type.  Avoids the macro gencode needing to import the type
+#[inline(always)]
 pub fn is_resolved_inputs(inputs: &impl TaskInput) -> bool {
     inputs.is_resolved()
 }

@@ -819,13 +819,9 @@ impl<B: Backend + 'static> TurboTasks<B> {
             match registry::get_value_type(type_id).get_trait_method(trait_method) {
                 Some(native_fn) => {
                     if let Some(filter) = native_fn.arg_meta.filter_owned {
-                        // The filter functor computes `is_resolved` on the post-filter (inline)
-                        // tuple, which can differ from the caller-supplied `inputs_resolved`
-                        // (computed on the exposed tuple) when filtering drops unresolved fields.
-                        // TODO: `persistence` is still computed on the *exposed* tuple at the
-                        // macro callsite. After filtering, a transient input that was filtered
-                        // out should not force the task to be transient; recomputing post-filter
-                        // would unlock caching for those calls.
+                        // TODO: filter should recompute task persistence as well? maybe minor
+                        // issue.  It is also unfortunate that our caller computed resolved and then
+                        // we recompute it when filtering, but the cost is quite cheap.
                         let (resolved, mut arg) = (filter)(arg);
                         return self.dynamic_call(
                             native_fn,

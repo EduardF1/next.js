@@ -456,13 +456,11 @@ impl TurboFn<'_> {
                             let (#(#exposed_input_idents,)*) =
                                 turbo_tasks::macro_helpers
                                     ::downcast_stack_args_owned::<(#(#exposed_input_types,)*)>(arg);
-                            let inline = (#(#inline_input_idents,)*);
-                            let resolved =
-                                turbo_tasks::macro_helpers::is_resolved_inputs(&inline);
+                            let used_inputs = (#(#inline_input_idents,)*);
                             (
-                                resolved,
+                                turbo_tasks::macro_helpers::is_resolved_inputs(&used_inputs),
                                 turbo_tasks::BoxedDynTaskInputs::new(
-                                    ::std::boxed::Box::new(inline),
+                                    ::std::boxed::Box::new(used_inputs),
                                 ),
                             )
                         }

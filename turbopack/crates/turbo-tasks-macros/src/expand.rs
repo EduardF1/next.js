@@ -1,9 +1,87 @@
 use proc_macro2::{Ident, TokenStream};
 use quote::quote;
 use syn::{
-    Data, DataEnum, DataStruct, DeriveInput, Field, Fields, FieldsNamed, FieldsUnnamed,
-    spanned::Spanned,
+    Data, DataEnum, DataStruct, DeriveInput, Field, Fields, FieldsNamed, FieldsUnnamed, Item,
+    ItemEnum, ItemStruct, spanned::Spanned,
 };
+
+/// Emit a field-walking body for `TaskInput::is_transient`: `field1.is_transient() ||
+/// field2.is_transient() || ... || false`. Used by both `#[turbo_tasks::task_input]` and
+/// `#[turbo_tasks::value(task_input)]` — they emit structurally identical `is_transient` impls,
+/// just on a different surrounding `impl TaskInput` block.
+pub fn task_input_is_transient_body(derive_input: &DeriveInput) -> TokenStream {
+    match_expansion(
+        derive_input,
+        &|_ident, fields| {
+            let (capture, fields) = generate_exhaustive_destructuring(fields.named.iter());
+            (
+                capture,
+                quote! {
+                    {#(
+                        turbo_tasks::TaskInput::is_transient(#fields) ||
+                    )* false}
+                },
+            )
+        },
+        &|_ident, fields| {
+            let (capture, fields) = generate_exhaustive_destructuring(fields.unnamed.iter());
+            (
+                capture,
+                quote! {
+                    {#(
+                        turbo_tasks::TaskInput::is_transient(#fields) ||
+                    )* false}
+                },
+            )
+        },
+        &|_ident| quote! {false},
+    )
+}
+
+/// Convert an `Item::Struct` / `Item::Enum` into a synthetic `DeriveInput` so we can reuse the
+/// existing `match_expansion` helper that the derive macros use.
+pub fn item_to_derive_input(item: &Item) -> Option<DeriveInput> {
+    match item {
+        Item::Struct(ItemStruct {
+            attrs,
+            vis,
+            ident,
+            generics,
+            fields,
+            semi_token,
+            ..
+        }) => Some(DeriveInput {
+            attrs: attrs.clone(),
+            vis: vis.clone(),
+            ident: ident.clone(),
+            generics: generics.clone(),
+            data: Data::Struct(DataStruct {
+                struct_token: Default::default(),
+                fields: fields.clone(),
+                semi_token: *semi_token,
+            }),
+        }),
+        Item::Enum(ItemEnum {
+            attrs,
+            vis,
+            ident,
+            generics,
+            variants,
+            ..
+        }) => Some(DeriveInput {
+            attrs: attrs.clone(),
+            vis: vis.clone(),
+            ident: ident.clone(),
+            generics: generics.clone(),
+            data: Data::Enum(DataEnum {
+                enum_token: Default::default(),
+                brace_token: Default::default(),
+                variants: variants.clone(),
+            }),
+        }),
+        _ => None,
+    }
+}
 
 /// Handles the expansion of a struct/enum into a match statement that accesses
 /// every field for procedural code generation.
@@ -32,12 +110,23 @@ pub fn match_expansion<
     let expand_unit = move |ident| (TokenStream::new(), expand_unit(ident));
     match &derive_input.data {
         Data::Enum(DataEnum { variants, .. }) => {
-            let (idents, (variants_fields_capture, expansion)): (Vec<_>, (Vec<_>, Vec<_>)) =
-                variants
-                    .iter()
-                    .map(|variant| {
-                        let variants_idents = &variant.ident;
-                        let ident = quote! { #ident::#variants_idents };
+            // Forward each variant's `#[cfg(...)]` attributes onto the generated match arm so a
+            // cfg'd-out variant doesn't appear in compiled code.
+            let (cfg_attrs, (idents, (variants_fields_capture, expansion))): (
+                Vec<_>,
+                (Vec<_>, (Vec<_>, Vec<_>)),
+            ) = variants
+                .iter()
+                .map(|variant| {
+                    let variants_idents = &variant.ident;
+                    let ident = quote! { #ident::#variants_idents };
+                    let cfgs: Vec<_> = variant
+                        .attrs
+                        .iter()
+                        .filter(|a| a.path().is_ident("cfg"))
+                        .collect();
+                    (
+                        quote! { #(#cfgs)* },
                         (
                             ident.clone(),
                             expand_fields(
@@ -47,9 +136,10 @@ pub fn match_expansion<
                                 expand_unnamed,
                                 expand_unit,
                             ),
-                        )
-                    })
-                    .unzip();
+                        ),
+                    )
+                })
+                .unzip();
 
             if idents.is_empty() {
                 let (_, expansion) = expand_unit(quote! { #ident });
@@ -60,6 +150,7 @@ pub fn match_expansion<
                 quote! {
                     match self {
                         #(
+                            #cfg_attrs
                             #idents #variants_fields_capture => #expansion,
                         )*
                     }

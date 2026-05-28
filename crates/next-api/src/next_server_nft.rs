@@ -6,10 +6,7 @@ use either::Either;
 use next_core::{get_next_package, next_server::get_tracing_compile_time_info};
 use serde_json::{Value, json};
 use turbo_rcstr::RcStr;
-use turbo_tasks::{
-    NonLocalValue, ResolvedVc, TaskInput, TryFlatJoinIterExt, TryJoinIterExt, Vc,
-    trace::TraceRawVcs,
-};
+use turbo_tasks::{ResolvedVc, TryFlatJoinIterExt, TryJoinIterExt, Vc, trace::TraceRawVcs};
 use turbo_tasks_fs::{
     DirectoryContent, DirectoryEntry, File, FileContent, FileSystemPath, glob::Glob,
 };
@@ -31,9 +28,8 @@ use crate::{
     project::Project,
 };
 
-#[derive(
-    PartialEq, Eq, TraceRawVcs, NonLocalValue, Debug, Clone, Hash, TaskInput, Encode, Decode,
-)]
+#[turbo_tasks::task_input]
+#[derive(PartialEq, Eq, TraceRawVcs, Debug, Clone, Hash, Encode, Decode)]
 enum ServerNftType {
     Minimal,
     Full,

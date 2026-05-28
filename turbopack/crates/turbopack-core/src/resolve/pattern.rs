@@ -10,13 +10,15 @@ use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::Instrument;
 use turbo_rcstr::{RcStr, rcstr};
-use turbo_tasks::{NonLocalValue, ValueToString, Vc, debug::ValueDebugFormat, trace::TraceRawVcs};
+use turbo_tasks::{
+    NonLocalValue, TaskInput, ValueToString, Vc, debug::ValueDebugFormat, trace::TraceRawVcs,
+};
 use turbo_tasks_fs::{
     FileSystemPath, LinkContent, LinkType, RawDirectoryContent, RawDirectoryEntry,
 };
 use turbo_unix_path::normalize_path;
 
-#[turbo_tasks::value(task_input)]
+#[turbo_tasks::value]
 #[derive(Hash, Clone, Debug, Default, ValueToString)]
 #[value_to_string(self.describe_as_string())]
 pub enum Pattern {
@@ -26,6 +28,15 @@ pub enum Pattern {
     DynamicNoSlash,
     Alternatives(Vec<Pattern>),
     Concatenation(Vec<Pattern>),
+}
+
+// Use a manual impl since llvm cannot prove the default generated recursive impl always returns
+// false from `is_transient`
+impl TaskInput for Pattern {
+    fn is_transient(&self) -> bool {
+        // contains no vcs
+        false
+    }
 }
 
 fn concatenation_push_or_merge_item(list: &mut Vec<Pattern>, pat: Pattern) {

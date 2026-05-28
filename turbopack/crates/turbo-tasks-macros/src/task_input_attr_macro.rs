@@ -24,14 +24,6 @@
 //! #[derive(Clone, Debug, Hash, PartialEq, Eq, TraceRawVcs, Encode, Decode)]
 //! pub struct VcCarrier { vc: Vc<SomeType> }
 //! ```
-//!
-//! If the user adds `#[turbo_tasks::task_input]` (default mode) AND also derives `NonLocalValue`
-//! manually, rustc errors with a duplicate-impl error — the contradiction is caught at compile
-//! time without needing extra static-assertion machinery.
-//!
-//! When emitting `unsafe impl NonLocalValue`, the macro also emits inline static assertions
-//! (mirroring `#[derive(NonLocalValue)]`) so a field that is not `NonLocalValue` produces a
-//! compile error pointing at the offending field instead of unsoundly satisfying the trait.
 
 use proc_macro::TokenStream;
 use proc_macro2::Span;
@@ -234,14 +226,18 @@ pub fn task_input(args: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
     } else {
-        // No unresolved Vcs: `is_resolved` and `resolve_input` use the trait defaults
-        // (`true` and a `CloneReady` future); only `is_transient` needs to walk fields.
+        // No unresolved Vcs: `is_resolved` and `resolve_input` use the trait defaults, only
+        // `is_transient` needs to walk fields. The `+ NonLocalValue` bound matches the
+        // `unsafe impl NonLocalValue` emitted below — without it, a `Wrapper<Vc<X>>` could
+        // satisfy `Wrapper: TaskInput` while `Wrapper<Vc<X>>: NonLocalValue` did not hold,
+        // defeating the storage-safety guarantee that motivates the default-mode
+        // `task_input` (the type must be safe to send across task boundaries).
         quote! {
             #[automatically_derived]
             impl #impl_generics turbo_tasks::TaskInput for #ident #ty_generics
             where
                 #(#existing_predicates,)*
-                #(#generic_type_params: turbo_tasks::TaskInput,)*
+                #(#generic_type_params: turbo_tasks::TaskInput + turbo_tasks::NonLocalValue,)*
             {
                 #[allow(non_snake_case)]
                 #[allow(unreachable_code)]
@@ -252,16 +248,25 @@ pub fn task_input(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
-    // Emit `unsafe impl NonLocalValue` unless opted out. Doubles as a contradiction check:
-    // a duplicate `#[derive(NonLocalValue)]` collides with this impl and errors.
+    // Emit `unsafe impl NonLocalValue` unless opted out.
     // The assertions mirror `#[derive(NonLocalValue)]`: they fail compilation (pointing at the
-    // offending field) if any field does not implement `NonLocalValue`.
+    // offending field) if any field does not implement `NonLocalValue`. The generics passed to
+    // the assertion helper are augmented with the same `T: NonLocalValue` predicates as the
+    // `unsafe impl` itself — without these, a `struct GenericField<T>(T)` would always fail the
+    // assertion since the assertion struct would not see the per-generic bound.
     let non_local_value_impl = if contains_unresolved_vcs.is_some() {
         quote! {}
     } else {
+        let mut assertion_generics = generics.clone();
+        let where_clause = assertion_generics.make_where_clause();
+        for param in &generic_type_params {
+            where_clause
+                .predicates
+                .push(parse_quote!(#param: turbo_tasks::NonLocalValue));
+        }
         let assertions = assert_fields_impl_trait(
             &parse_quote!(turbo_tasks::NonLocalValue),
-            &generics,
+            &assertion_generics,
             &derive_input.data,
             filter_field,
         );

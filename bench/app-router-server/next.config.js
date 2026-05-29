@@ -1,5 +1,8 @@
 module.exports = {
+  cacheComponents: true,
   experimental: {
-    appDir: true,
+    turbopackMinify: false,
+    turbopackModuleIds: 'named',
+    turbopackScopeHoisting: false,
   },
 }

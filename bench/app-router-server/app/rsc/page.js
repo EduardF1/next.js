@@ -1,5 +1,7 @@
 import * as React from 'react'
+import { logic } from './logic'
 
 export default function page() {
-  return <div>hello</div>
+  const data = logic()
+  return <div>hello {data}</div>
 }

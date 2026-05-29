@@ -51,7 +51,7 @@ use turbo_tasks::{
     ResolvedVc, TaskInput, TransientInstance, TryJoinIterExt, TurboTasksApi, TurboTasksCallApi,
     UpdateInfo, Vc, mark_top_level_task,
     message_queue::{CompilationEvent, Severity},
-    take_effects,
+    read_strongly_consistent_and_apply_effects, take_effects,
     trace::TraceRawVcs,
     unmark_top_level_task_may_leak_eventually_consistent_state,
 };
@@ -1424,17 +1424,18 @@ pub async fn project_write_all_entrypoints_to_disk(
                 first_phase,
             );
 
-            // Read and compile the files
+            // Read and compile the files, applying phase side effects. Asset emission is
+            // performed once at the end.
+            let read =
+                read_strongly_consistent_and_apply_effects(entrypoints_with_issues_op, |v| {
+                    &v.effects
+                })
+                .await?;
             let AllWrittenEntrypointsWithIssues {
                 entrypoints,
                 issues,
-                effects,
-            } = &*entrypoints_with_issues_op
-                .read_strongly_consistent()
-                .await?;
-
-            // Apply phase side effects. Asset emission is performed once at the end.
-            effects.apply().await?;
+                ..
+            } = &*read;
 
             Ok((
                 entrypoints.clone(),
@@ -1489,16 +1490,17 @@ pub async fn project_write_all_entrypoints_to_disk(
                     EntrypointsWritePhase::Deferred,
                 );
 
+                // Apply phase side effects. Asset emission is performed once at the end.
+                let read =
+                    read_strongly_consistent_and_apply_effects(entrypoints_with_issues_op, |v| {
+                        &v.effects
+                    })
+                    .await?;
                 let AllWrittenEntrypointsWithIssues {
                     entrypoints,
                     issues,
-                    effects,
-                } = &*entrypoints_with_issues_op
-                    .read_strongly_consistent()
-                    .await?;
-
-                // Apply phase side effects. Asset emission is performed once at the end.
-                effects.apply().await?;
+                    ..
+                } = &*read;
 
                 Ok((
                     entrypoints.clone(),
@@ -1521,10 +1523,9 @@ pub async fn project_write_all_entrypoints_to_disk(
                 app_dir_only,
                 has_deferred_entrypoints,
             );
-            let OperationResult { issues, effects } =
-                &*emit_result_op.read_strongly_consistent().await?;
-
-            effects.apply().await?;
+            let read =
+                read_strongly_consistent_and_apply_effects(emit_result_op, |v| &v.effects).await?;
+            let OperationResult { issues, .. } = &*read;
 
             Ok(issues.iter().cloned().collect::<Vec<_>>())
         })
@@ -1763,15 +1764,16 @@ pub fn project_entrypoints_subscribe(
         move || {
             async move {
                 let entrypoints_with_issues_op = get_entrypoints_with_issues_operation(container);
+                let read =
+                    read_strongly_consistent_and_apply_effects(entrypoints_with_issues_op, |v| {
+                        &v.effects
+                    })
+                    .await?;
                 let EntrypointsWithIssues {
                     entrypoints,
                     issues,
-                    effects,
-                } = &*entrypoints_with_issues_op
-                    .read_strongly_consistent()
-                    .await?;
-
-                effects.apply().await?;
+                    ..
+                } = &*read;
                 Ok((entrypoints.clone(), issues.clone()))
             }
             .instrument(tracing::info_span!("entrypoints subscription"))
@@ -1876,17 +1878,14 @@ pub fn project_hmr_events(
                         state,
                         hmr_target,
                     );
-                    let update = update_op.read_strongly_consistent().await?;
-                    let HmrUpdateWithIssues {
-                        update,
-                        issues,
-                        effects,
-                    } = &*update;
                     // HACK(bgw): Remove this mark call
                     mark_top_level_task();
-                    effects.apply().await?;
+                    let read =
+                        read_strongly_consistent_and_apply_effects(update_op, |v| &v.effects).await;
                     // HACK(bgw): Remove this unmark call
                     unmark_top_level_task_may_leak_eventually_consistent_state();
+                    let read = read?;
+                    let HmrUpdateWithIssues { update, issues, .. } = &*read;
                     match &**update {
                         Update::Missing | Update::None => {}
                         Update::Total(TotalUpdate { to }) => {
@@ -1998,14 +1997,16 @@ pub fn project_hmr_chunk_names_subscribe(
         move || async move {
             let hmr_chunk_names_with_issues_op =
                 get_hmr_chunk_names_with_issues_operation(container, hmr_target);
+            let read =
+                read_strongly_consistent_and_apply_effects(hmr_chunk_names_with_issues_op, |v| {
+                    &v.effects
+                })
+                .await?;
             let HmrChunkNamesWithIssues {
                 chunk_names,
                 issues,
-                effects,
-            } = &*hmr_chunk_names_with_issues_op
-                .read_strongly_consistent()
-                .await?;
-            effects.apply().await?;
+                ..
+            } = &*read;
 
             Ok((chunk_names.clone(), issues.clone()))
         },
@@ -2475,11 +2476,10 @@ pub async fn project_write_analyze_data(
         .turbo_tasks()
         .run_once(async move {
             let analyze_data_op = write_analyze_data_with_issues_operation(container, app_dir_only);
-            let WriteAnalyzeResult { issues, effects } =
-                &*analyze_data_op.read_strongly_consistent().await?;
-
             // Write the files to disk
-            effects.apply().await?;
+            let read =
+                read_strongly_consistent_and_apply_effects(analyze_data_op, |v| &v.effects).await?;
+            let WriteAnalyzeResult { issues, .. } = &*read;
             Ok(issues.clone())
         })
         .await

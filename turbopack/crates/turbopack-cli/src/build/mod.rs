@@ -12,7 +12,7 @@ use tracing::Instrument;
 use turbo_rcstr::RcStr;
 use turbo_tasks::{
     Effects, OperationVc, ResolvedVc, TransientInstance, TryJoinIterExt, TurboTasks, Vc,
-    take_effects,
+    read_strongly_consistent_and_apply_effects, take_effects,
 };
 use turbo_tasks_backend::{
     BackendOptions, GitVersionInfo, NoopBackingStorage, StartupCacheState, StorageMode,
@@ -158,10 +158,9 @@ impl TurbopackBuildBuilder {
                     self.scope_hoist,
                 ));
 
-                // Await the result to propagate any errors and capture effects.
-                let effects = wrapper_op.read_strongly_consistent().await?;
-
-                effects.apply().await?;
+                // Await the result to propagate any errors and apply effects (retrying on
+                // `EffectsError::Retry`).
+                read_strongly_consistent_and_apply_effects(wrapper_op, |e| e).await?;
 
                 let issue_reporter: Vc<Box<dyn IssueReporter>> =
                     Vc::upcast(ConsoleUi::new(TransientInstance::new(LogOptions {

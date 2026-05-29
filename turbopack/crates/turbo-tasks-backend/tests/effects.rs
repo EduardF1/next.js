@@ -4,8 +4,8 @@
 //! increments a shared counter, so we can directly assert how many times each
 //! effect's side-effect actually ran across various producer/apply scenarios:
 //!
-//! - Duplicate sequential `.apply()` on the same `Effects` value runs each side-effect exactly once
-//!   (per-key state machine short-circuits).
+//! - Duplicate sequential `.apply_for_testing()` on the same `Effects` value runs each side-effect
+//!   exactly once (per-key state machine short-circuits).
 //! - Re-emitting the same `(key, value_hash)` set from a re-executed producer does not re-run any
 //!   side-effect (the cached `Applied { value_hash }` in `EffectStateStorage` matches).
 //! - Re-emitting with a changed hash for one key re-runs only that key's side-effect; unchanged
@@ -29,8 +29,8 @@ use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use turbo_tasks::{
     ApplyOutcome, CapturedEffect, Effect, EffectStateStorage, Effects, EffectsError, NonLocalValue,
-    OperationValue, ReadRef, ResolvedVc, State, TurboTasks, Vc, emit_effect, take_effects,
-    trace::TraceRawVcs,
+    OperationValue, ReadRef, ResolvedVc, State, TurboTasks, Vc, emit_effect,
+    read_strongly_consistent_and_apply_effects, take_effects, trace::TraceRawVcs,
 };
 use turbo_tasks_backend::{
     BackendOptions, NoopBackingStorage, TurboTasksBackend, noop_backing_storage,
@@ -294,7 +294,7 @@ fn create_tt() -> Arc<TurboTasks<TurboTasksBackend<NoopBackingStorage>>> {
 // Tests
 // =============================================================================
 
-/// A duplicate sequential `.apply()` on the same `Effects` must run each
+/// A duplicate sequential `.apply_for_testing()` on the same `Effects` must run each
 /// underlying side-effect exactly once. The first call populates the per-key
 /// `EffectStateStorage` with `Applied { value_hash }`; the second call sees
 /// `Effects.captured == None` and falls through `apply_post_drop` where every
@@ -307,10 +307,10 @@ async fn duplicate_apply_runs_once() {
 
         let effects = emit_and_take(&spec, input, vec![(1, 0xAAAA)]).await?;
 
-        effects.apply().await?;
+        effects.apply_for_testing().await?;
         assert_eq!(shared.applies_for(1), 1, "first apply runs the effect");
 
-        effects.apply().await?;
+        effects.apply_for_testing().await?;
         assert_eq!(
             shared.applies_for(1),
             1,
@@ -325,7 +325,7 @@ async fn duplicate_apply_runs_once() {
 
 /// Re-running the producer (e.g. because something upstream invalidated it)
 /// with the same `(key, value_hash)` set produces a fresh `Effects` value
-/// whose identity multiset matches the previous one. `.apply()` on the new
+/// whose identity multiset matches the previous one. `.apply_for_testing()` on the new
 /// `Effects` short-circuits through the per-key state machine because each
 /// `EffectStateEntry` is still `Applied { value_hash: matching }`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -336,7 +336,7 @@ async fn reemit_unchanged_hash_does_not_reapply() {
 
         emit_and_take(&spec, input, vec![(1, 0xAAAA), (2, 0xBBBB)])
             .await?
-            .apply()
+            .apply_for_testing()
             .await?;
         assert_eq!(shared.total(), 2, "first emit runs both effects");
 
@@ -345,7 +345,7 @@ async fn reemit_unchanged_hash_does_not_reapply() {
         // is still a fresh root task — it re-takes the producer's collectibles.
         emit_and_take(&spec, input, vec![(1, 0xAAAA), (2, 0xBBBB)])
             .await?
-            .apply()
+            .apply_for_testing()
             .await?;
         assert_eq!(
             shared.total(),
@@ -369,7 +369,7 @@ async fn hash_change_reapplies_only_changed_key() {
 
         emit_and_take(&spec, input, vec![(1, 0xAAAA), (2, 0xBBBB)])
             .await?
-            .apply()
+            .apply_for_testing()
             .await?;
         assert_eq!(shared.applies_for(1), 1);
         assert_eq!(shared.applies_for(2), 1);
@@ -377,7 +377,7 @@ async fn hash_change_reapplies_only_changed_key() {
         // Change key 1's hash; leave key 2 alone.
         emit_and_take(&spec, input, vec![(1, 0xCCCC), (2, 0xBBBB)])
             .await?
-            .apply()
+            .apply_for_testing()
             .await?;
         assert_eq!(
             shared.applies_for(1),
@@ -406,14 +406,14 @@ async fn adding_effect_only_runs_new_key() {
 
         emit_and_take(&spec, input, vec![(1, 0xAAAA)])
             .await?
-            .apply()
+            .apply_for_testing()
             .await?;
         assert_eq!(shared.total(), 1);
 
         // Add a new effect, key 2.
         emit_and_take(&spec, input, vec![(1, 0xAAAA), (2, 0xBBBB)])
             .await?
-            .apply()
+            .apply_for_testing()
             .await?;
 
         assert_eq!(shared.applies_for(1), 1, "key 1 already applied");
@@ -434,14 +434,14 @@ async fn removing_effect_does_not_reapply_survivors() {
 
         emit_and_take(&spec, input, vec![(1, 0xAAAA), (2, 0xBBBB)])
             .await?
-            .apply()
+            .apply_for_testing()
             .await?;
         assert_eq!(shared.total(), 2);
 
         // Drop key 2.
         emit_and_take(&spec, input, vec![(1, 0xAAAA)])
             .await?
-            .apply()
+            .apply_for_testing()
             .await?;
 
         assert_eq!(shared.applies_for(1), 1, "key 1 stays cached");
@@ -484,14 +484,14 @@ async fn sibling_producer_overwrites_state_reapplies_on_call() {
         });
         let op_a = extract_effects(input_a);
         let effects_a = op_a.read_strongly_consistent().await?;
-        effects_a.apply().await?;
+        effects_a.apply_for_testing().await?;
         assert_eq!(shared.applies_for(1), 1, "A's first apply ran");
 
         // Step 2: B emits and applies (key=1, hash=H2). Different hash for the
         // same key overwrites the per-key state entry.
         emit_and_take(&spec_b, input_b, vec![(1, 0xBBBB)])
             .await?
-            .apply()
+            .apply_for_testing()
             .await?;
         assert_eq!(shared.applies_for(1), 2, "B's apply for the same key ran");
 
@@ -499,7 +499,7 @@ async fn sibling_producer_overwrites_state_reapplies_on_call() {
         // (Effects keeps captured for the cell's lifetime; cell="new" drops it
         // when the producer reruns), so the state machine breaks into InProgress
         // and re-runs A's body, then writes back Applied{H_A}.
-        effects_a.apply().await?;
+        effects_a.apply_for_testing().await?;
         assert_eq!(
             shared.applies_for(1),
             3,
@@ -529,10 +529,10 @@ async fn repeated_apply_after_unchanged_state_dedupes() {
         });
         let op = extract_effects(input);
         let effects = op.read_strongly_consistent().await?;
-        effects.apply().await?;
+        effects.apply_for_testing().await?;
         assert_eq!(shared.applies_for(1), 1);
 
-        effects.apply().await?;
+        effects.apply_for_testing().await?;
         assert_eq!(
             shared.applies_for(1),
             1,
@@ -597,7 +597,10 @@ async fn capture_skips_content_when_storage_matches() {
             pairs: vec![(1, 0xAAAA)],
         });
         let op = extract_effects(input);
-        op.read_strongly_consistent().await?.apply().await?;
+        op.read_strongly_consistent()
+            .await?
+            .apply_for_testing()
+            .await?;
         assert_eq!(shared.applies_for(1), 1, "first apply ran");
         assert_eq!(
             shared.captures_with_content(),
@@ -611,7 +614,10 @@ async fn capture_skips_content_when_storage_matches() {
         // true and we skip content materialization. Apply dedup-hits via the
         // state machine.
         tick.set(1);
-        op.read_strongly_consistent().await?.apply().await?;
+        op.read_strongly_consistent()
+            .await?
+            .apply_for_testing()
+            .await?;
         assert_eq!(
             shared.applies_for(1),
             1,
@@ -656,7 +662,10 @@ async fn capture_skip_then_stomp_signals_retry() {
             pairs: vec![(1, 0xAAAA)],
         });
         let op_a = extract_effects(input_a);
-        op_a.read_strongly_consistent().await?.apply().await?;
+        op_a.read_strongly_consistent()
+            .await?
+            .apply_for_testing()
+            .await?;
         assert_eq!(shared.applies_for(1), 1);
         assert_eq!(shared.captures_with_content(), 1);
 
@@ -676,15 +685,18 @@ async fn capture_skip_then_stomp_signals_retry() {
         // and writes back Applied{H_B}.
         emit_and_take(&spec_b, input_b, vec![(1, 0xBBBB)])
             .await?
-            .apply()
+            .apply_for_testing()
             .await?;
         assert_eq!(shared.applies_for(1), 2);
 
         // T4: A's apply on the content-elided Effects. State is Applied{H_B} ≠
         // H_A; capture had no content → run_apply returns Retry.
-        let err = effects_a_skipped.apply().await.expect_err("expected Retry");
+        let err = effects_a_skipped
+            .apply_for_testing()
+            .await
+            .expect_err("expected Retry");
         assert!(
-            matches!(err, EffectsError::Retry),
+            matches!(err, EffectsError::Retry { .. }),
             "expected EffectsError::Retry, got {err:?}"
         );
         assert_eq!(
@@ -695,7 +707,10 @@ async fn capture_skip_then_stomp_signals_retry() {
 
         // T5: Re-read A. capture sees Applied{H_B} ≠ H_A so it materializes
         // content. Apply succeeds and writes back Applied{H_A}.
-        op_a.read_strongly_consistent().await?.apply().await?;
+        op_a.read_strongly_consistent()
+            .await?
+            .apply_for_testing()
+            .await?;
         assert_eq!(
             shared.applies_for(1),
             3,
@@ -705,6 +720,73 @@ async fn capture_skip_then_stomp_signals_retry() {
             shared.captures_with_content() >= 2,
             "recovery capture had to materialize at least once (storage diverged); got {}",
             shared.captures_with_content(),
+        );
+
+        anyhow::Ok(())
+    })
+    .await
+    .unwrap()
+}
+
+/// `read_strongly_consistent_and_apply_effects` is the production entry point: it owns the
+/// read+apply+retry loop that recovers from `EffectsError::Retry`. This drives the same
+/// content-elided-then-stomped scenario as `capture_skip_then_stomp_signals_retry`, but performs
+/// the recovery through the helper instead of a hand-rolled re-read. A bare `apply` would surface
+/// `Retry`; the helper must instead re-read the (invalidated) producer, re-capture with content,
+/// apply successfully, and return the fresh value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn helper_recovers_from_retry() {
+    let tt = create_tt();
+    tt.run_once(async move {
+        let (
+            input_a,
+            TestInput {
+                shared,
+                spec: spec_a,
+                tick: tick_a,
+            },
+        ) = TestInput::new();
+        let (input_b, TestInput { spec: spec_b, .. }) = TestInput::new_with_shared(shared.clone());
+
+        // T1: A applies (key=1, H_A). Storage = Applied{H_A}.
+        spec_a.set(EmitSpec {
+            pairs: vec![(1, 0xAAAA)],
+        });
+        let op_a = extract_effects(input_a);
+        op_a.read_strongly_consistent()
+            .await?
+            .apply_for_testing()
+            .await?;
+        assert_eq!(shared.applies_for(1), 1);
+
+        // T2: Force A to rerun without changing its emitted hash; capture elides content because
+        // storage still holds Applied{H_A}.
+        tick_a.set(1);
+        let effects_a_skipped = op_a.read_strongly_consistent().await?;
+        assert_eq!(shared.captures_with_content(), 1, "second capture elided");
+
+        // T3: B stomps storage to Applied{H_B}.
+        emit_and_take(&spec_b, input_b, vec![(1, 0xBBBB)])
+            .await?
+            .apply_for_testing()
+            .await?;
+        assert_eq!(shared.applies_for(1), 2);
+
+        // T4: A's content-elided apply signals Retry and invalidates A's producer. (We assert the
+        // raw signal here so the recovery below is unambiguously the helper's doing.)
+        let err = effects_a_skipped
+            .apply_for_testing()
+            .await
+            .expect_err("expected Retry");
+        assert!(matches!(err, EffectsError::Retry { .. }));
+
+        // T5: Recover through the production helper. It re-reads the invalidated producer (fresh
+        // capture materializes content because storage diverged), applies, and returns Ok.
+        read_strongly_consistent_and_apply_effects(op_a, |e| e).await?;
+        assert_eq!(
+            shared.applies_for(1),
+            3,
+            "helper re-read + re-applied A's effect, recovering from Retry",
         );
 
         anyhow::Ok(())

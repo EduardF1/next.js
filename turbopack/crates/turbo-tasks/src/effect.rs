@@ -4,10 +4,7 @@ use std::{
     future::Future,
     mem::{forget, replace},
     pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::Arc,
 };
 
 use anyhow::Result;
@@ -17,7 +14,8 @@ use rustc_hash::FxHashMap;
 use tracing::Instrument;
 
 use crate::{
-    self as turbo_tasks, CollectiblesSource, NonLocalValue, ResolvedVc, TryJoinIterExt, emit,
+    self as turbo_tasks, CollectiblesSource, NonLocalValue, OperationVc, ReadRef, ResolvedVc,
+    TryJoinIterExt, VcRead, VcValueType, emit,
     event::Event,
     invalidation::{Invalidator, get_invalidator},
     manager::{
@@ -470,8 +468,18 @@ pub enum EffectsError {
     /// per-key state for at least one effect no longer carries a matching `Applied { value_hash
     /// }`. The producing operation has been invalidated; the caller should re-read the operation
     /// and call `apply()` again on the fresh [`Effects`] value.
-    #[error("effect state was reset; producing operation has been invalidated, retry required")]
-    Retry,
+    ///
+    /// Carries the producing task's name and the conflicting key name(s) for diagnostics.
+    /// [`read_strongly_consistent_and_apply_effects`] consumes these to log a warning when a
+    /// retry repeats.
+    #[error(
+        "effect state was reset for {}; producing task {task_name} invalidated, retry required",
+        keys.join(", ")
+    )]
+    Retry {
+        task_name: String,
+        keys: Vec<String>,
+    },
 }
 
 impl From<Arc<dyn EffectError>> for EffectsError {
@@ -582,7 +590,13 @@ impl Effects {
     /// consistency][crate::OperationVc::read_strongly_consistent].
     ///
     /// See [`take_effects`] for example usage.
-    pub async fn apply(&self) -> Result<(), EffectsError> {
+    ///
+    /// **Do not call this directly.** External callers must go through
+    /// [`read_strongly_consistent_and_apply_effects`], which owns the read+apply+retry loop
+    /// required to recover from [`EffectsError::Retry`]. Exposed publicly only as
+    /// [`Effects::apply_for_testing`] (`#[doc(hidden)]`) so integration tests can drive the apply
+    /// state machine directly.
+    async fn apply(&self) -> Result<(), EffectsError> {
         debug_assert_in_top_level_task(
             "Effects::apply must be called from a top-level task to avoid unintended \
              re-executions due to eventual consistency",
@@ -599,10 +613,11 @@ impl Effects {
         let captured = &self.captured;
 
         async {
-            // Collect a single `Retry` signal across the parallel apply so we invalidate at most
-            // once at the end of the batch. `Apply` errors still take precedence — they fail-fast
-            // through the `try_for_each_concurrent`.
-            let needs_retry = AtomicBool::new(false);
+            // Collect the keys of any effects that signaled `Retry` across the parallel apply so
+            // we invalidate at most once at the end of the batch and can report which outputs
+            // forced the retry. `Apply` errors still take precedence — they fail-fast through the
+            // `try_for_each_concurrent`.
+            let retry_keys = Mutex::new(Vec::<String>::new());
             let result: Result<(), EffectsError> = futures::stream::iter(unique.iter())
                 .map(Ok::<_, EffectsError>)
                 .try_for_each_concurrent(
@@ -611,7 +626,10 @@ impl Effects {
                         Ok(()) => Ok(()),
                         Err(ApplyOutcome::Failed(err)) => Err(EffectsError::Apply(err)),
                         Err(ApplyOutcome::Retry) => {
-                            needs_retry.store(true, Ordering::Relaxed);
+                            let key = captured[*idx].key();
+                            retry_keys
+                                .lock()
+                                .push(String::from_utf8_lossy(&key).into_owned());
                             Ok(())
                         }
                     },
@@ -620,22 +638,100 @@ impl Effects {
 
             match result {
                 Err(e) => Err(e),
-                Ok(()) if needs_retry.load(Ordering::Relaxed) => self.signal_retry(),
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    let retry_keys = retry_keys.into_inner();
+                    if retry_keys.is_empty() {
+                        Ok(())
+                    } else {
+                        self.signal_retry(retry_keys)
+                    }
+                }
             }
         }
         .instrument(span)
         .await
     }
 
-    /// Invalidate the producing task (if any) and return `EffectsError::Retry`. Used when some
-    /// captured effect signaled [`ApplyOutcome::Retry`] (capture elided content materialization
-    /// but storage state diverged before apply).
-    fn signal_retry(&self) -> Result<(), EffectsError> {
-        if let Some(invalidator) = self.invalidator {
-            with_turbo_tasks(|tt| invalidator.invalidate(&**tt));
+    /// Test-only public alias for [`Effects::apply`]. Lets integration tests in other crates drive
+    /// the per-key apply state machine directly (e.g. asserting dedup counts or the raw
+    /// [`EffectsError::Retry`] signal). Production code must use
+    /// [`read_strongly_consistent_and_apply_effects`] instead, which owns the retry loop.
+    #[doc(hidden)]
+    pub async fn apply_for_testing(&self) -> Result<(), EffectsError> {
+        self.apply().await
+    }
+
+    /// Invalidate the producing task (if any) and return [`EffectsError::Retry`] carrying the
+    /// producing task's name and the `keys` that signaled [`ApplyOutcome::Retry`] (their capture
+    /// elided content materialization but storage state diverged before apply).
+    fn signal_retry(&self, keys: Vec<String>) -> Result<(), EffectsError> {
+        let task_name = match self.invalidator {
+            Some(invalidator) => with_turbo_tasks(|tt| {
+                let name = tt.get_task_name(invalidator.task_id());
+                invalidator.invalidate(&**tt);
+                name
+            }),
+            None => "<unknown>".to_string(),
+        };
+        Err(EffectsError::Retry { task_name, keys })
+    }
+}
+
+/// Strongly-consistent read of `op`, then apply its effects, retrying the whole read+apply on
+/// [`EffectsError::Retry`].
+///
+/// `get_effects` extracts the [`Effects`] from the read value (for a wrapper struct this is
+/// `|v| &v.effects`; for an `OperationVc<Effects>` it is `|e| e`).
+///
+/// On [`EffectsError::Retry`] the producing operation has already been invalidated by
+/// [`Effects::apply`], so the next
+/// [`read_strongly_consistent`][OperationVc::read_strongly_consistent] re-runs the producer and
+/// yields a fresh [`Effects`] whose `capture()` re-materializes content. Retries are bounded to
+/// avoid livelock when two producers perpetually stomp the same key; after the first retry a
+/// warning is logged on each subsequent attempt, and on exhaustion the last `Retry` surfaces as an
+/// error.
+///
+/// This is the only public entry point for applying effects — [`Effects::apply`] is private so the
+/// retry contract cannot be bypassed.
+pub async fn read_strongly_consistent_and_apply_effects<T, F>(
+    op: OperationVc<T>,
+    get_effects: F,
+) -> Result<ReadRef<T>>
+where
+    T: VcValueType,
+    F: Fn(&<<T as VcValueType>::Read as VcRead<T>>::Target) -> &Effects,
+{
+    const MAX_RETRIES: usize = 4; // chosen by a fair dice roll
+    let mut attempts = 0usize;
+    loop {
+        let value = op.read_strongly_consistent().await?;
+        // Deref the `ReadRef<T>` to the read target (`T` for non-transparent types).
+        let effects = get_effects(&*value);
+        match effects.apply().await {
+            Ok(()) => return Ok(value),
+            Err(EffectsError::Retry { task_name, keys }) if attempts < MAX_RETRIES => {
+                attempts += 1;
+                // Warn on every retry after the first.
+                if attempts > 1 {
+                    eprintln!(
+                        "BUG: {task_name} has retried {attempts} times to write an output: \
+                         {keys:?}.  This implies multiple routes are fighting to write one of \
+                         these files.",
+                    );
+                }
+                continue;
+            }
+            // Retries exhausted: surface that we gave up after `MAX_RETRIES`, naming the task and
+            // the contended outputs.
+            Err(EffectsError::Retry { task_name, keys }) => {
+                anyhow::bail!(
+                    "gave up applying effects for {task_name} after {MAX_RETRIES} retries; \
+                     repeated effect-state divergence on: {keys:?}. This implies multiple routes \
+                     are fighting to write one of these files."
+                );
+            }
+            Err(e) => return Err(e.into()),
         }
-        Err(EffectsError::Retry)
     }
 }
 

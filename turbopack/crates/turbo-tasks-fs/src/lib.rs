@@ -3260,7 +3260,7 @@ mod tests {
 
         use rand::{RngExt, SeedableRng};
         use turbo_rcstr::{RcStr, rcstr};
-        use turbo_tasks::{ResolvedVc, Vc};
+        use turbo_tasks::{ResolvedVc, Vc, read_strongly_consistent_and_apply_effects};
         use turbo_tasks_backend::{BackendOptions, TurboTasksBackend, noop_backing_storage};
 
         use super::extract_effects_operation;
@@ -3332,14 +3332,14 @@ mod tests {
                     .await?;
                 let root_path = disk_file_system_root(fs);
 
-                extract_effects_operation(test_write_link_effect_operation(
-                    fs,
-                    root_path.clone(),
-                    rcstr!("subdir-a"),
-                ))
-                .read_strongly_consistent()
-                .await?
-                .apply()
+                read_strongly_consistent_and_apply_effects(
+                    extract_effects_operation(test_write_link_effect_operation(
+                        fs,
+                        root_path.clone(),
+                        rcstr!("subdir-a"),
+                    )),
+                    |e| e,
+                )
                 .await?;
 
                 assert_eq!(read_to_string(path.join("symlink-file")).unwrap(), "foo");
@@ -3349,14 +3349,14 @@ mod tests {
                 );
 
                 // Write the same links again but with different targets
-                extract_effects_operation(test_write_link_effect_operation(
-                    fs,
-                    root_path,
-                    rcstr!("subdir-b"),
-                ))
-                .read_strongly_consistent()
-                .await?
-                .apply()
+                read_strongly_consistent_and_apply_effects(
+                    extract_effects_operation(test_write_link_effect_operation(
+                        fs,
+                        root_path,
+                        rcstr!("subdir-b"),
+                    )),
+                    |e| e,
+                )
                 .await?;
 
                 assert_eq!(read_to_string(path.join("symlink-file")).unwrap(), "bar");
@@ -3447,14 +3447,14 @@ mod tests {
 
                 let initial_updates: Vec<(usize, usize)> =
                     (0..STRESS_SYMLINK_COUNT).map(|i| (i, 0)).collect();
-                extract_effects_operation(write_symlink_stress_batch(
-                    fs,
-                    symlinks_dir.clone(),
-                    initial_updates,
-                ))
-                .read_strongly_consistent()
-                .await?
-                .apply()
+                read_strongly_consistent_and_apply_effects(
+                    extract_effects_operation(write_symlink_stress_batch(
+                        fs,
+                        symlinks_dir.clone(),
+                        initial_updates,
+                    )),
+                    |e| e,
+                )
                 .await?;
 
                 let mut rng = rand::rngs::SmallRng::seed_from_u64(0);
@@ -3467,14 +3467,14 @@ mod tests {
                     }
                     let updates: Vec<(usize, usize)> = updates_map.into_iter().collect();
 
-                    extract_effects_operation(write_symlink_stress_batch(
-                        fs,
-                        symlinks_dir.clone(),
-                        updates,
-                    ))
-                    .read_strongly_consistent()
-                    .await?
-                    .apply()
+                    read_strongly_consistent_and_apply_effects(
+                        extract_effects_operation(write_symlink_stress_batch(
+                            fs,
+                            symlinks_dir.clone(),
+                            updates,
+                        )),
+                        |e| e,
+                    )
                     .await?;
                 }
 
@@ -3497,7 +3497,7 @@ mod tests {
         };
 
         use turbo_rcstr::{RcStr, rcstr};
-        use turbo_tasks::{Effects, Vc, take_effects};
+        use turbo_tasks::{Effects, Vc, read_strongly_consistent_and_apply_effects, take_effects};
         use turbo_tasks_backend::{BackendOptions, TurboTasksBackend, noop_backing_storage};
 
         use crate::{
@@ -3823,15 +3823,13 @@ mod tests {
                 const TEST_CONTENT: &str = "test content";
 
                 // Test 1: Writing to allowed directory should work
-                let effects = write_allowed_file_operation(
+                let effects_op = write_allowed_file_operation(
                     root.clone(),
                     denied_path.clone(),
                     RcStr::from(ALLOWED_FILE),
                     RcStr::from(TEST_CONTENT),
-                )
-                .read_strongly_consistent()
-                .await?;
-                effects.apply().await?;
+                );
+                read_strongly_consistent_and_apply_effects(effects_op, |e| e).await?;
 
                 // Verify the file was written to disk
                 let content = read_to_string(Path::new(root.as_str()).join(ALLOWED_FILE))?;

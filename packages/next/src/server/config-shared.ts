@@ -1139,6 +1139,11 @@ export interface ExperimentalConfig {
   useCache?: boolean
 
   /**
+   * Enables durable `"use cache"` remote cache entries across deployments.
+   */
+  durableUseCacheEntries?: boolean
+
+  /**
    * Use Node.js native streams instead of web streams for the App Router
    * rendering pipeline on the Node.js runtime. This can improve performance
    * by avoiding the overhead of web stream wrappers.

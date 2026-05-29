@@ -1454,6 +1454,7 @@ impl AppEndpoint {
             this.app_project
                 .project()
                 .runtime_chunking_context(process_client_assets, runtime),
+            project.next_config(),
         )
         .await?;
         if emit_rsc_manifests {

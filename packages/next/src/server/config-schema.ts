@@ -426,6 +426,7 @@ export const experimentalSchema = {
   serverComponentsHmrCache: z.boolean().optional(),
   authInterrupts: z.boolean().optional(),
   useCache: z.boolean().optional(),
+  durableUseCacheEntries: z.boolean().optional(),
   useCacheTimeout: z.number().positive().optional(),
   useNodeStreams: z.boolean().optional(),
   slowModuleDetection: z

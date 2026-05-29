@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, io::Write};
 use anyhow::{Context, Result, bail};
 use bincode::{Decode, Encode};
 use next_core::{
+    next_config::NextConfig,
     next_manifests::{
         ActionLayer, ActionManifestModuleId, ActionManifestWorkerEntry, ServerReferenceManifest,
     },
@@ -73,6 +74,7 @@ pub(crate) async fn create_server_actions_manifest(
     rsc_asset_context: Vc<Box<dyn AssetContext>>,
     module_graph: Vc<ModuleGraph>,
     chunking_context: Vc<Box<dyn ChunkingContext>>,
+    next_config: Vc<NextConfig>,
 ) -> Result<Vc<ServerActionsManifest>> {
     let loader =
         build_server_actions_loader(project_path, page_name.clone(), actions, rsc_asset_context);
@@ -89,6 +91,7 @@ pub(crate) async fn create_server_actions_manifest(
         chunk_item,
         module_graph,
         chunking_context,
+        next_config,
     )
     .await?;
     Ok(ServerActionsManifest {
@@ -166,6 +169,7 @@ async fn build_manifest(
     chunk_item: Vc<Box<dyn ChunkItem>>,
     module_graph: Vc<ModuleGraph>,
     chunking_context: Vc<Box<dyn ChunkingContext>>,
+    next_config: Vc<NextConfig>,
 ) -> Result<ResolvedVc<Box<dyn OutputAsset>>> {
     let async_module_info = module_graph.async_module_info();
 
@@ -198,6 +202,7 @@ async fn build_manifest(
         code_hash: Option<ReadRef<RcStr>>,
     }
 
+    let durable_use_cache_entries = *next_config.enable_durable_use_cache_entries().await?;
     // Collect all the action metadata including filenames and location
     let action_metadata: Vec<(String, ActionMetadata)> = actions_value
         .iter()
@@ -217,11 +222,15 @@ async fn build_manifest(
                     layer: *layer,
                     exported_name: meta.name.clone(),
                     filename,
-                    // TODO only do this for "use cache" functions, not all server actions
-                    code_hash: Some(
-                        compute_subtree_content_hash(module_graph, **module, chunking_context)
-                            .await?,
-                    ),
+                    code_hash: if durable_use_cache_entries {
+                        // TODO only do this for "use cache" functions, not all server actions
+                        Some(
+                            compute_subtree_content_hash(module_graph, **module, chunking_context)
+                                .await?,
+                        )
+                    } else {
+                        None
+                    },
                 },
             ))
         })

@@ -204,7 +204,7 @@ impl InstrumentationEndpoint {
             *this.project,
             None,
             this.project.module_graph(userland_module),
-            vec![userland_module],
+            userland_module,
         ))
     }
 }

@@ -1959,7 +1959,7 @@ impl AppEndpoint {
             this.app_project.project(),
             Some(app_function_name(&app_entry.original_name).into()),
             *module_graphs.full,
-            vec![*rsc_entry],
+            *rsc_entry,
         ))
     }
 }

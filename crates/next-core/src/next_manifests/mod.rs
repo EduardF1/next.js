@@ -407,6 +407,8 @@ pub struct ActionManifestWorkerEntry<'a> {
     #[serde(rename = "exportedName")]
     pub exported_name: &'a str,
     pub filename: &'a str,
+    #[serde(rename = "codeHash")]
+    pub code_hash: Option<&'a str>,
 }
 
 #[derive(Serialize, Debug, Clone)]

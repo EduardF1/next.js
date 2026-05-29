@@ -21,12 +21,13 @@ use swc_core::{
 };
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{
-    FxIndexMap, NonLocalValue, OperationVc, ResolvedVc, TryFlatJoinIterExt, TryJoinIterExt, Vc,
-    trace::TraceRawVcs,
+    FxIndexMap, FxIndexSet, NonLocalValue, OperationVc, ReadRef, ResolvedVc, TryFlatJoinIterExt,
+    TryJoinIterExt, ValueToString, Vc, trace::TraceRawVcs,
 };
 use turbo_tasks_fs::{self, File, FileContent, FileSystemPath, rope::RopeBuilder};
+use turbo_tasks_hash::{HashAlgorithm, deterministic_hash, hash_xxh3_hash128};
 use turbopack_core::{
-    asset::AssetContent,
+    asset::{Asset, AssetContent},
     chunk::{
         ChunkItem, ChunkItemExt, ChunkableModule, ChunkingContext, EvaluatableAsset, ModuleId,
     },
@@ -34,15 +35,18 @@ use turbopack_core::{
     file_source::FileSource,
     ident::AssetIdent,
     module::Module,
-    module_graph::{ModuleGraph, ModuleGraphLayer, async_module_info::AsyncModulesInfo},
+    module_graph::{GraphTraversalAction, ModuleGraph, ModuleGraphLayer},
     output::OutputAsset,
+    raw_module::RawModule,
     reference_type::{EcmaScriptModulesReferenceSubType, ReferenceType},
     resolve::ModulePart,
     virtual_output::VirtualOutputAsset,
     virtual_source::VirtualSource,
 };
 use turbopack_ecmascript::{
-    EcmascriptParsable, chunk::EcmascriptChunkPlaceable, parse::ParseResult,
+    EcmascriptParsable,
+    chunk::{EcmascriptChunkItem, EcmascriptChunkItemExt, EcmascriptChunkPlaceable},
+    parse::ParseResult,
     tree_shake::part::module::EcmascriptModulePartAsset,
 };
 
@@ -83,7 +87,8 @@ pub(crate) async fn create_server_actions_manifest(
         runtime,
         actions,
         chunk_item,
-        module_graph.async_module_info(),
+        module_graph,
+        chunking_context,
     )
     .await?;
     Ok(ServerActionsManifest {
@@ -159,8 +164,11 @@ async fn build_manifest(
     runtime: NextRuntime,
     actions: Vc<AllActions>,
     chunk_item: Vc<Box<dyn ChunkItem>>,
-    async_module_info: Vc<AsyncModulesInfo>,
+    module_graph: Vc<ModuleGraph>,
+    chunking_context: Vc<Box<dyn ChunkingContext>>,
 ) -> Result<ResolvedVc<Box<dyn OutputAsset>>> {
+    let async_module_info = module_graph.async_module_info();
+
     let manifest_path_prefix = &page_name;
     let manifest_path = node_root.join(&format!(
         "server/app{manifest_path_prefix}/server-reference-manifest.json",
@@ -183,9 +191,11 @@ async fn build_manifest(
     };
 
     struct ActionMetadata {
+        #[allow(dead_code)]
         layer: ActionLayer,
         exported_name: String,
         filename: String,
+        code_hash: Option<ReadRef<RcStr>>,
     }
 
     // Collect all the action metadata including filenames and location
@@ -207,6 +217,11 @@ async fn build_manifest(
                     layer: *layer,
                     exported_name: meta.name.clone(),
                     filename,
+                    // TODO only do this for "use cache" functions, not all server actions
+                    code_hash: Some(
+                        compute_subtree_content_hash(module_graph, **module, chunking_context)
+                            .await?,
+                    ),
                 },
             ))
         })
@@ -220,6 +235,7 @@ async fn build_manifest(
             layer: _,
             exported_name,
             filename,
+            code_hash,
         },
     ) in &action_metadata
     {
@@ -233,6 +249,7 @@ async fn build_manifest(
                     .await?,
                 exported_name: exported_name.as_str(),
                 filename: filename.as_str(),
+                code_hash: code_hash.as_ref().map(|h| h.as_str()),
             },
         );
 
@@ -283,6 +300,81 @@ pub async fn to_rsc_context(
         .to_resolved()
         .await?;
     Ok(module)
+}
+
+#[turbo_tasks::function]
+async fn compute_subtree_content_hash(
+    module_graph: ResolvedVc<ModuleGraph>,
+    entry: ResolvedVc<Box<dyn Module>>,
+    chunking_context: Vc<Box<dyn ChunkingContext>>,
+) -> Result<Vc<RcStr>> {
+    let module_graph_value = module_graph.await?;
+    let async_module_info = module_graph.async_module_info();
+
+    let mut modules = FxIndexSet::default();
+    module_graph_value.traverse_edges_dfs(
+        std::iter::once(entry),
+        &mut (),
+        |_, target, _| {
+            modules.insert(target);
+            Ok(GraphTraversalAction::Continue)
+        },
+        |_, _, _| Ok(()),
+        true,
+    )?;
+
+    println!(
+        "Modules in subtree for {}: {:#?}",
+        entry.ident().await?.path,
+        modules.iter().map(|m| m.ident_string()).try_join().await?
+    );
+
+    let hashes = modules
+        .into_iter()
+        .map(async |m| {
+            let ident = m.ident().to_string().await?;
+            Ok(
+                if let Some(m) = ResolvedVc::try_downcast_type::<RawModule>(m) {
+                    let content_hash = m
+                        .source()
+                        .await?
+                        .with_context(|| format!("failed to get source for traced module {ident}"))?
+                        .content()
+                        .hash(HashAlgorithm::Xxh3Hash128Hex)
+                        .await?;
+                    // Traced module
+                    hash_xxh3_hash128((ident, content_hash))
+                } else if let Some(placeable_module) =
+                    ResolvedVc::try_downcast::<Box<dyn EcmascriptChunkPlaceable>>(m)
+                {
+                    let chunk_item = placeable_module
+                        .as_chunk_item(*module_graph, chunking_context)
+                        .to_resolved()
+                        .await?;
+                    let chunk_item =
+                        ResolvedVc::try_downcast::<Box<dyn EcmascriptChunkItem>>(chunk_item)
+                            .unwrap();
+                    let async_info = if async_module_info.is_async(m).await? {
+                        Some(module_graph.referenced_async_modules(*m))
+                    } else {
+                        None
+                    };
+                    let code = chunk_item.code(async_info).await?;
+                    hash_xxh3_hash128((ident, code.source_code()))
+                } else {
+                    bail!(
+                        "Failed to compute hash for module {ident}: not a RawModule or \
+                         ChunkableModule"
+                    );
+                },
+            )
+        })
+        .try_join()
+        .await?;
+
+    Ok(Vc::cell(
+        deterministic_hash("", hashes, HashAlgorithm::Xxh3Hash128Hex).into(),
+    ))
 }
 
 /// Server action info for JSON parsing

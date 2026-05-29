@@ -1,3 +1,3 @@
 export function foo() {
-  return 1234
+  return 'foo-v1'
 }

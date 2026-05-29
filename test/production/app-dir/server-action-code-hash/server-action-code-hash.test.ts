@@ -61,10 +61,11 @@ describe('app-dir - server-action-code-hash', () => {
     await next.patchFile(
       'app/logic.js',
       `import { foo } from './foo'
+import { external } from 'external-dep'
 
 export async function logic() {
   'use cache'
-  return foo() + 1
+  return \`\${foo()}:\${external()}\` + ":other"
 }
 `,
       async () => {
@@ -85,7 +86,27 @@ export async function logic() {
     await next.patchFile(
       'app/foo.js',
       `export function foo() {
-  return 5678
+  return "foo-v2"
+}
+`,
+      async () => {
+        await next.build()
+        const after = await getCodeHashes(next)
+
+        expect(Object.keys(after)).toEqual(Object.keys(before))
+        expect(after).not.toEqual(before)
+      }
+    )
+  })
+
+  it('changes when an external (node_modules) dependency changes', async () => {
+    await next.build()
+    const before = await getCodeHashes(next)
+
+    await next.patchFile(
+      'node_modules/external-dep/index.js',
+      `export function external() {
+  return 'external-v2'
 }
 `,
       async () => {
@@ -105,7 +126,7 @@ export async function logic() {
     await next.patchFile(
       'app/unrelated.js',
       `export function unrelated() {
-  return 'changed'
+  return 'unrelated-v2'
 }
 `,
       async () => {

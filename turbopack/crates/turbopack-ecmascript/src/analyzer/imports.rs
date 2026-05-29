@@ -552,7 +552,7 @@ impl ImportMap {
                 Box::new(JsValue::Module(ModuleValue {
                     module: r.module_path.clone(),
                     annotations: r.annotations.clone(),
-                    reference: Some(esm_reference_idx),
+                    reference: Some(esm_reference_idx as u32),
                     analyze_for_constants: is_import_name_eligible_for_exports(export.as_str()),
                 })),
                 Box::new(JsValue::Constant(ConstantValue::Str(export))),
@@ -561,7 +561,7 @@ impl ImportMap {
             JsValue::Module(ModuleValue {
                 module: r.module_path.clone(),
                 annotations: r.annotations.clone(),
-                reference: Some(esm_reference_idx),
+                reference: Some(esm_reference_idx as u32),
                 analyze_for_constants: false,
             })
         }

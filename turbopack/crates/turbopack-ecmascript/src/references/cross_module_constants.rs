@@ -51,7 +51,7 @@ pub async fn module_value_to_constants_module(
     };
 
     let import_reference = import_references
-        .get(reference_idx)
+        .get(reference_idx as usize)
         .with_context(|| format!("couldn't find import reference at index {reference_idx}"))?;
 
     // We are reusing the exact resolve options from EsmAssetReference here, which is good and gives

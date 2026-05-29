@@ -305,7 +305,7 @@ pub struct ModuleValue {
     // `early_visitor` plus `visitor` setup. Then this could just be implemented with a rewrite
     // rule for `Member(ModuleValue, prop) if prop.as_str().is_upper_case() => { ... }`
     pub analyze_for_constants: bool,
-    pub reference: Option<usize>,
+    pub reference: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]

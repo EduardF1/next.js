@@ -21,7 +21,8 @@ use swc_core::{
 };
 use turbo_rcstr::{RcStr, rcstr};
 use turbo_tasks::{
-    FxIndexMap, NonLocalValue, OperationVc, ResolvedVc, TryFlatJoinIterExt, Vc, trace::TraceRawVcs,
+    FxIndexMap, NonLocalValue, OperationVc, ResolvedVc, TryFlatJoinIterExt, TryJoinIterExt, Vc,
+    trace::TraceRawVcs,
 };
 use turbo_tasks_fs::{self, File, FileContent, FileSystemPath, rope::RopeBuilder};
 use turbopack_core::{
@@ -44,9 +45,6 @@ use turbopack_ecmascript::{
     EcmascriptParsable, chunk::EcmascriptChunkPlaceable, parse::ParseResult,
     tree_shake::part::module::EcmascriptModulePartAsset,
 };
-
-/// Metadata for a server action: (layer, exported_name, filename)
-type ActionMetadata = (ActionLayer, String, String);
 
 #[turbo_tasks::value]
 pub(crate) struct ServerActionsManifest {
@@ -184,22 +182,47 @@ async fn build_manifest(
         NextRuntime::NodeJs => &mut manifest.node,
     };
 
-    // Collect all the action metadata including filenames and location
-    let mut action_metadata: Vec<(String, ActionMetadata)> = Vec::new();
-    for (hash_id, (layer, meta, module)) in actions_value.iter() {
-        // Use source_path from the action comment if available (contains original .ts/.tsx path),
-        // otherwise fall back to module.ident().path() (may be compiled .js path)
-        let filename = if !meta.source_path.is_empty() {
-            meta.source_path.clone()
-        } else {
-            module.ident().await?.path.to_string()
-        };
-
-        action_metadata.push((hash_id.clone(), (*layer, meta.name.clone(), filename)));
+    struct ActionMetadata {
+        layer: ActionLayer,
+        exported_name: String,
+        filename: String,
     }
 
+    // Collect all the action metadata including filenames and location
+    let action_metadata: Vec<(String, ActionMetadata)> = actions_value
+        .iter()
+        .map(async |(hash_id, (layer, meta, module))| {
+            // Use source_path from the action comment if available (contains original .ts/.tsx
+            // path), otherwise fall back to module.ident().path() (may be compiled .js
+            // path)
+            let filename = if !meta.source_path.is_empty() {
+                meta.source_path.clone()
+            } else {
+                module.ident().await?.path.to_string()
+            };
+
+            Ok((
+                hash_id.clone(),
+                ActionMetadata {
+                    layer: *layer,
+                    exported_name: meta.name.clone(),
+                    filename,
+                },
+            ))
+        })
+        .try_join()
+        .await?;
+
     // Now create the manifest entries
-    for (hash_id, (_layer, name, filename)) in &action_metadata {
+    for (
+        hash_id,
+        ActionMetadata {
+            layer: _,
+            exported_name,
+            filename,
+        },
+    ) in &action_metadata
+    {
         let entry = mapping.entry(hash_id.as_str()).or_default();
         entry.workers.insert(
             &key,
@@ -208,13 +231,13 @@ async fn build_manifest(
                 is_async: async_module_info
                     .is_async(chunk_item.module().to_resolved().await?)
                     .await?,
-                exported_name: name.as_str(),
+                exported_name: exported_name.as_str(),
                 filename: filename.as_str(),
             },
         );
 
         // Hoist the filename and exported_name to the entry level
-        entry.exported_name = name.as_str();
+        entry.exported_name = exported_name.as_str();
         entry.filename = filename.as_str();
     }
 

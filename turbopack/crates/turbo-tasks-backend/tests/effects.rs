@@ -202,6 +202,7 @@ struct EmitSpec {
 /// this is what lets us simulate two sibling producers writing the same key
 /// in the retry test.
 #[turbo_tasks::value(eq = "manual", serialization = "skip")]
+#[derive(Clone)]
 struct TestInput {
     #[turbo_tasks(trace_ignore, debug_ignore)]
     shared: Arc<Shared>,
@@ -222,34 +223,18 @@ impl PartialEq for TestInput {
 
 impl TestInput {
     /// Construct a fresh `TestInput` cell with a fresh `Shared`.
-    fn new() -> (
-        ResolvedVc<Self>,
-        Arc<Shared>,
-        Arc<State<EmitSpec>>,
-        Arc<State<u64>>,
-    ) {
+    fn new() -> (ResolvedVc<Self>, Self) {
         Self::new_with_shared(Shared::new())
     }
 
     /// Construct a fresh `TestInput` cell that shares an existing `Shared`.
     /// The new input has its own independent spec.
-    fn new_with_shared(
-        shared: Arc<Shared>,
-    ) -> (
-        ResolvedVc<Self>,
-        Arc<Shared>,
-        Arc<State<EmitSpec>>,
-        Arc<State<u64>>,
-    ) {
+    fn new_with_shared(shared: Arc<Shared>) -> (ResolvedVc<Self>, Self) {
         let spec = Arc::new(State::new(EmitSpec::default()));
         let tick = Arc::new(State::new(0u64));
-        let cell = Self {
-            shared: shared.clone(),
-            spec: spec.clone(),
-            tick: tick.clone(),
-        }
-        .resolved_cell();
-        (cell, shared, spec, tick)
+        let input = Self { shared, spec, tick };
+
+        (input.clone().resolved_cell(), input)
     }
 }
 
@@ -291,7 +276,7 @@ async fn emit_and_take(
     pairs: Vec<(u32, u64)>,
 ) -> Result<ReadRef<Effects>> {
     spec.set(EmitSpec { pairs });
-    Ok(extract_effects(input).read_strongly_consistent().await?)
+    extract_effects(input).read_strongly_consistent().await
 }
 
 // =============================================================================
@@ -318,7 +303,7 @@ fn create_tt() -> Arc<TurboTasks<TurboTasksBackend<NoopBackingStorage>>> {
 async fn duplicate_apply_runs_once() {
     let tt = create_tt();
     tt.run_once(async move {
-        let (input, shared, spec, _tick) = TestInput::new();
+        let (input, TestInput { shared, spec, .. }) = TestInput::new();
 
         let effects = emit_and_take(&spec, input, vec![(1, 0xAAAA)]).await?;
 
@@ -347,7 +332,7 @@ async fn duplicate_apply_runs_once() {
 async fn reemit_unchanged_hash_does_not_reapply() {
     let tt = create_tt();
     tt.run_once(async move {
-        let (input, shared, spec, _tick) = TestInput::new();
+        let (input, TestInput { shared, spec, .. }) = TestInput::new();
 
         emit_and_take(&spec, input, vec![(1, 0xAAAA), (2, 0xBBBB)])
             .await?
@@ -380,7 +365,7 @@ async fn reemit_unchanged_hash_does_not_reapply() {
 async fn hash_change_reapplies_only_changed_key() {
     let tt = create_tt();
     tt.run_once(async move {
-        let (input, shared, spec, _tick) = TestInput::new();
+        let (input, TestInput { shared, spec, .. }) = TestInput::new();
 
         emit_and_take(&spec, input, vec![(1, 0xAAAA), (2, 0xBBBB)])
             .await?
@@ -417,7 +402,7 @@ async fn hash_change_reapplies_only_changed_key() {
 async fn adding_effect_only_runs_new_key() {
     let tt = create_tt();
     tt.run_once(async move {
-        let (input, shared, spec, _tick) = TestInput::new();
+        let (input, TestInput { shared, spec, .. }) = TestInput::new();
 
         emit_and_take(&spec, input, vec![(1, 0xAAAA)])
             .await?
@@ -445,7 +430,7 @@ async fn adding_effect_only_runs_new_key() {
 async fn removing_effect_does_not_reapply_survivors() {
     let tt = create_tt();
     tt.run_once(async move {
-        let (input, shared, spec, _tick) = TestInput::new();
+        let (input, TestInput { shared, spec, .. }) = TestInput::new();
 
         emit_and_take(&spec, input, vec![(1, 0xAAAA), (2, 0xBBBB)])
             .await?
@@ -483,8 +468,15 @@ async fn removing_effect_does_not_reapply_survivors() {
 async fn sibling_producer_overwrites_state_reapplies_on_call() {
     let tt = create_tt();
     tt.run_once(async move {
-        let (input_a, shared, spec_a, _tick_a) = TestInput::new();
-        let (input_b, _shared_b, spec_b, _tick_b) = TestInput::new_with_shared(shared.clone());
+        let (
+            input_a,
+            TestInput {
+                shared,
+                spec: spec_a,
+                ..
+            },
+        ) = TestInput::new();
+        let (input_b, TestInput { spec: spec_b, .. }) = TestInput::new_with_shared(shared.clone());
 
         // Step 1: A emits and applies (key=1, hash=H1).
         spec_a.set(EmitSpec {
@@ -530,7 +522,7 @@ async fn sibling_producer_overwrites_state_reapplies_on_call() {
 async fn repeated_apply_after_unchanged_state_dedupes() {
     let tt = create_tt();
     tt.run_once(async move {
-        let (input, shared, spec, _tick) = TestInput::new();
+        let (input, TestInput { shared, spec, .. }) = TestInput::new();
 
         spec.set(EmitSpec {
             pairs: vec![(1, 0xAAAA)],
@@ -561,7 +553,7 @@ async fn repeated_apply_after_unchanged_state_dedupes() {
 async fn cell_new_produces_distinct_effects_per_producer_run() {
     let tt = create_tt();
     tt.run_once(async move {
-        let (input, _shared, spec, _tick) = TestInput::new();
+        let (input, TestInput { spec, .. }) = TestInput::new();
 
         spec.set(EmitSpec {
             pairs: vec![(1, 0xAAAA)],
@@ -594,7 +586,12 @@ async fn cell_new_produces_distinct_effects_per_producer_run() {
 async fn capture_skips_content_when_storage_matches() {
     let tt = create_tt();
     tt.run_once(async move {
-        let (input, shared, spec, tick) = TestInput::new();
+        let (
+            input,
+            TestInput {
+                shared, spec, tick, ..
+            },
+        ) = TestInput::new();
 
         spec.set(EmitSpec {
             pairs: vec![(1, 0xAAAA)],
@@ -643,8 +640,15 @@ async fn capture_skips_content_when_storage_matches() {
 async fn capture_skip_then_stomp_signals_retry() {
     let tt = create_tt();
     tt.run_once(async move {
-        let (input_a, shared, spec_a, tick_a) = TestInput::new();
-        let (input_b, _shared_b, spec_b, _tick_b) = TestInput::new_with_shared(shared.clone());
+        let (
+            input_a,
+            TestInput {
+                shared,
+                spec: spec_a,
+                tick: tick_a,
+            },
+        ) = TestInput::new();
+        let (input_b, TestInput { spec: spec_b, .. }) = TestInput::new_with_shared(shared.clone());
 
         // T1: A applies (key=1, H_A). Storage = Applied{H_A}. Capture had to
         // materialize (storage was empty).

@@ -85,8 +85,8 @@ pub use crate::{
         DynTaskInputs, OwnedStackDynTaskInputs, StackDynTaskInputs, StackDynTaskInputsSlot,
     },
     effect::{
-        CapturedEffect, Effect, EffectError, EffectStateStorage, Effects, EffectsError,
-        emit_effect, take_effects,
+        ApplyOutcome, CapturedEffect, Effect, EffectError, EffectStateStorage, Effects,
+        EffectsError, emit_effect, take_effects,
     },
     error::PrettyPrintError,
     id::{

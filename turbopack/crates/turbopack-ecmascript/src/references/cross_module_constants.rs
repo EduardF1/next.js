@@ -187,7 +187,10 @@ pub async fn get_constants(
 
     let compile_time_info_ref = compile_time_info.await?;
 
-    let exports: Vec<(RcStr, Option<ConstantValue>)> = eval_context
+    let exports: Vec<(
+        RcStr,
+        std::result::Result<ConstantValue, Option<NonConstantIssue>>,
+    )> = eval_context
         .imports
         .exports_ids
         .iter()
@@ -236,29 +239,49 @@ pub async fn get_constants(
             .await?;
 
             if let JsValue::Constant(constant) = linked_value.0 {
-                Ok((export_name.as_str().into(), Some(constant)))
+                Ok((export_name.as_str().into(), Ok(constant)))
             } else {
-                if directives.constants_module {
-                    NonConstantIssue {
-                        export: export_name.as_str().into(),
-                        file_path: module.ident().await?.path.clone(),
-                        source: module.source().await?.map(|source| {
-                            IssueSource::from_swc_offsets(
-                                source,
-                                span.lo.to_u32(),
-                                span.hi.to_u32(),
-                            )
-                        }),
-                        value: linked_value.0.explain(10, 5),
-                    }
-                    .resolved_cell()
-                    .emit();
-                }
-                Ok((export_name.as_str().into(), None))
+                Ok((
+                    export_name.as_str().into(),
+                    if directives.constants_module {
+                        Err(Some(NonConstantIssue {
+                            export: export_name.as_str().into(),
+                            file_path: module.ident().await?.path.clone(),
+                            source: module.source().await?.map(|source| {
+                                IssueSource::from_swc_offsets(
+                                    source,
+                                    span.lo.to_u32(),
+                                    span.hi.to_u32(),
+                                )
+                            }),
+                            value: linked_value.0.explain(10, 5),
+                        }))
+                    } else {
+                        Err(None)
+                    },
+                ))
             }
         })
         .try_join()
         .await?;
+
+    let exports = exports
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name,
+                match value {
+                    Ok(v) => Some(v),
+                    Err(issue) => {
+                        if let Some(issue) = issue {
+                            issue.resolved_cell().emit();
+                        }
+                        None
+                    }
+                },
+            )
+        })
+        .collect();
 
     Ok(Vc::cell(Some(ConstantsModule {
         exports,
